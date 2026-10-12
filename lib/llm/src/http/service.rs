@@ -23,6 +23,7 @@ mod batch_proxy;
 pub mod metadata;
 mod openai;
 mod write_timeout;
+pub(crate) use openai::terminal_outcome_for_stage_error;
 
 pub mod busy_threshold;
 pub mod disconnect;
