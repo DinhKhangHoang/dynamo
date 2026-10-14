@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::types::KvSchedulerError;
+use crate::plugins::worker_selection::{WorkerInputRows, WorkerInputs};
 use crate::protocols::WorkerWithDpRank;
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -81,6 +82,8 @@ pub(crate) struct RequestClassifierRuntime {
     // keeps serving: one request's failure must not disable classification
     // router-wide, and the plugin owns its own state across an unwind.
     classifier: Arc<AsyncMutex<Box<dyn RequestClassifier>>>,
+    // Read once at install so classification never takes the classifier lock to ask.
+    worker_inputs: WorkerInputs,
     live_requests: Mutex<HashMap<String, LiveRequest>>,
     // Shared with the delivery task, which releases each terminal event once
     // `on_event` has returned for it.
@@ -105,6 +108,7 @@ impl RequestClassifierRuntime {
         shutdown: CancellationToken,
     ) -> Arc<Self> {
         let (events, mut receiver) = mpsc::unbounded_channel();
+        let worker_inputs = classifier.required_worker_inputs();
         let classifier = Arc::new(AsyncMutex::new(classifier));
         let pending_terminals = Arc::new(PendingTerminals::default());
         let delivery_classifier = Arc::clone(&classifier);
@@ -151,6 +155,7 @@ impl RequestClassifierRuntime {
         });
         Arc::new(Self {
             classifier,
+            worker_inputs,
             live_requests: Mutex::new(HashMap::new()),
             pending_terminals,
             events,
@@ -159,9 +164,16 @@ impl RequestClassifierRuntime {
         })
     }
 
+    pub(crate) fn worker_inputs(&self) -> WorkerInputs {
+        self.worker_inputs
+    }
+
+    /// `workers` holds the rows for the classifier's declared inputs. They are lent to
+    /// `classify` and freed when it returns, before the classification future is awaited.
     pub(crate) async fn classify_with(
         &self,
         mut request: ClassifyRequest,
+        workers: WorkerInputRows,
     ) -> Result<ClassifyRequest, KvSchedulerError> {
         if self.shutdown.is_cancelled() {
             return Err(KvSchedulerError::SubscriberShutdown);
@@ -205,9 +217,12 @@ impl RequestClassifierRuntime {
                     request_id.to_owned(),
                 ));
             }
-            catch_unwind(AssertUnwindSafe(|| classifier.classify(request))).map_err(|panic| {
-                KvSchedulerError::RequestClassifierPanicked(panic_message(panic))
-            })?
+            let classification = catch_unwind(AssertUnwindSafe(|| {
+                workers.read(|workers| classifier.classify(request, workers))
+            }))
+            .map_err(|panic| KvSchedulerError::RequestClassifierPanicked(panic_message(panic)))?;
+            drop(workers);
+            classification
         };
         let classification = AssertUnwindSafe(classification).catch_unwind();
 
@@ -524,6 +539,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::plugins::worker_selection::WorkerCandidates;
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::KvSchedulerError;
 
@@ -536,7 +552,11 @@ mod tests {
     }
 
     impl RequestClassifier for SynchronousPanicOnce {
-        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 panic!("synchronous classifier panic");
             }
@@ -555,7 +575,7 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0))
+            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -564,7 +584,7 @@ mod tests {
                 if message == "synchronous classifier panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0))
+            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -575,7 +595,11 @@ mod tests {
     }
 
     impl RequestClassifier for FuturePanicOnce {
-        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             let should_panic = self.calls.fetch_add(1, Ordering::Relaxed) == 0;
             Box::pin(async move {
                 assert!(!should_panic, "classifier future panic");
@@ -595,7 +619,7 @@ mod tests {
         );
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0))
+            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -604,7 +628,7 @@ mod tests {
                 if message == "classifier future panic"
         ));
         runtime
-            .classify_with(ClassifyRequest::new(2, 0))
+            .classify_with(ClassifyRequest::new(2, 0), WorkerInputRows::empty())
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -617,7 +641,11 @@ mod tests {
     struct FailingClassifier;
 
     impl RequestClassifier for FailingClassifier {
-        fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            _request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             Box::pin(async { Err(Box::new(TestClassifierError) as Box<ClassifierError>) })
         }
     }
@@ -628,7 +656,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(FailingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0))
+            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -641,7 +669,11 @@ mod tests {
     struct ReplacingClassifier;
 
     impl RequestClassifier for ReplacingClassifier {
-        fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            _request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             Box::pin(async { Ok(ClassifyRequest::new(2, 0)) })
         }
     }
@@ -652,7 +684,7 @@ mod tests {
             RequestClassifierRuntime::new(Box::new(ReplacingClassifier), CancellationToken::new());
 
         let error = runtime
-            .classify_with(ClassifyRequest::new(1, 0))
+            .classify_with(ClassifyRequest::new(1, 0), WorkerInputRows::empty())
             .await
             .unwrap_err();
         assert!(matches!(
@@ -685,7 +717,10 @@ mod tests {
             .with_request_id("request-1")
             .with_initial_policy_class("latency");
 
-        let result = PassThrough.classify(request).await.unwrap();
+        let result = WorkerInputRows::empty()
+            .read(|workers| PassThrough.classify(request, workers))
+            .await
+            .unwrap();
 
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
@@ -704,7 +739,11 @@ mod tests {
 
     #[async_trait]
     impl RequestClassifier for EventReleasedClassifier {
-        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             let entered = Arc::clone(&self.entered);
             let released = Arc::clone(&self.released);
             Box::pin(async move {
@@ -736,7 +775,7 @@ mod tests {
         let pending_runtime = Arc::clone(&runtime);
         let pending = tokio::spawn(async move {
             pending_runtime
-                .classify_with(ClassifyRequest::new(1, 1))
+                .classify_with(ClassifyRequest::new(1, 1), WorkerInputRows::empty())
                 .await
         });
         entered.notified().await;
@@ -753,7 +792,11 @@ mod tests {
 
     #[async_trait]
     impl RequestClassifier for PendingClassifier {
-        fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            _request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             self.entered.fetch_add(1, Ordering::Relaxed);
             Box::pin(std::future::pending())
         }
@@ -781,7 +824,10 @@ mod tests {
         let cancelled = tokio::spawn(async move {
             let _lifecycle = cancelled_runtime.begin_request("cancelled").unwrap();
             cancelled_runtime
-                .classify_with(ClassifyRequest::new(1, 0).with_request_id("cancelled"))
+                .classify_with(
+                    ClassifyRequest::new(1, 0).with_request_id("cancelled"),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         while entered.load(Ordering::Relaxed) < 1 {
@@ -818,7 +864,10 @@ mod tests {
         );
         let lifecycle = runtime.begin_request("off-runtime-drop").unwrap();
         runtime
-            .classify_with(ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"))
+            .classify_with(
+                ClassifyRequest::new(1, 0).with_request_id("off-runtime-drop"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
 
@@ -831,7 +880,11 @@ mod tests {
     }
 
     impl RequestClassifier for CountingClassifier {
-        fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            mut request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             self.calls.fetch_add(1, Ordering::Relaxed);
             request.set_scheduling_cost_tokens(7);
             request.set_worker_selection_target(WorkerWithDpRank::new(9, 1));
@@ -851,7 +904,10 @@ mod tests {
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
 
         let first = runtime
-            .classify_with(ClassifyRequest::new(10, 10).with_request_id("request-1"))
+            .classify_with(
+                ClassifyRequest::new(10, 10).with_request_id("request-1"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         assert_eq!(first.progress().context_tokens(), 10);
@@ -860,7 +916,10 @@ mod tests {
         assert_eq!(first.progress().context_tokens(), 25);
         lifecycle.prepare_retry();
         let retry = runtime
-            .classify_with(ClassifyRequest::new(20, 20).with_request_id("request-1"))
+            .classify_with(
+                ClassifyRequest::new(20, 20).with_request_id("request-1"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
 
@@ -881,7 +940,10 @@ mod tests {
 
         let mut next_lifecycle = runtime.begin_request("request-1").unwrap();
         let next = runtime
-            .classify_with(ClassifyRequest::new(3, 0).with_request_id("request-1"))
+            .classify_with(
+                ClassifyRequest::new(3, 0).with_request_id("request-1"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         next_lifecycle.observe_context_tokens(3);
@@ -908,7 +970,10 @@ mod tests {
         );
 
         let result = runtime
-            .classify_with(ClassifyRequest::new(4, 0).with_request_id("ghost"))
+            .classify_with(
+                ClassifyRequest::new(4, 0).with_request_id("ghost"),
+                WorkerInputRows::empty(),
+            )
             .await;
 
         assert!(matches!(
@@ -925,7 +990,11 @@ mod tests {
     }
 
     impl RequestClassifier for GatedClassifier {
-        fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            mut request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
@@ -956,7 +1025,10 @@ mod tests {
         let stale_runtime = Arc::clone(&runtime);
         let stale = tokio::spawn(async move {
             stale_runtime
-                .classify_with(ClassifyRequest::new(1, 0).with_request_id("reused"))
+                .classify_with(
+                    ClassifyRequest::new(1, 0).with_request_id("reused"),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         entered.notified().await;
@@ -976,7 +1048,10 @@ mod tests {
         // classification reaches the plugin instead of reusing overrides.
         release.notify_one();
         let second = runtime
-            .classify_with(ClassifyRequest::new(1, 0).with_request_id("reused"))
+            .classify_with(
+                ClassifyRequest::new(1, 0).with_request_id("reused"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -994,8 +1069,10 @@ mod tests {
         );
         let lifecycle = runtime.begin_request("reused").unwrap();
         let guard = runtime.classifier.lock().await;
-        let mut stale =
-            Box::pin(runtime.classify_with(ClassifyRequest::new(1, 0).with_request_id("reused")));
+        let mut stale = Box::pin(runtime.classify_with(
+            ClassifyRequest::new(1, 0).with_request_id("reused"),
+            WorkerInputRows::empty(),
+        ));
 
         // Poll once to guarantee the old call is waiting for the lock, then
         // replace its lifecycle before the plugin can be invoked.
@@ -1012,7 +1089,10 @@ mod tests {
 
         // The replacement must reach the plugin, without stale overrides.
         let replacement = runtime
-            .classify_with(ClassifyRequest::new(100, 0).with_request_id("reused"))
+            .classify_with(
+                ClassifyRequest::new(100, 0).with_request_id("reused"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
         assert_eq!(replacement.input_tokens(), 100);
@@ -1037,7 +1117,10 @@ mod tests {
         let ended_runtime = Arc::clone(&runtime);
         let ended = tokio::spawn(async move {
             ended_runtime
-                .classify_with(ClassifyRequest::new(1, 0).with_request_id("ended"))
+                .classify_with(
+                    ClassifyRequest::new(1, 0).with_request_id("ended"),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         tokio::task::yield_now().await;
@@ -1067,7 +1150,10 @@ mod tests {
         let ended_runtime = Arc::clone(&runtime);
         let ended = tokio::spawn(async move {
             ended_runtime
-                .classify_with(ClassifyRequest::new(1, 0).with_request_id("ended"))
+                .classify_with(
+                    ClassifyRequest::new(1, 0).with_request_id("ended"),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         entered.notified().await;
@@ -1128,7 +1214,10 @@ mod tests {
         let worker = WorkerWithDpRank::new(7, 2);
         let mut lifecycle = runtime.begin_request("request-1").unwrap();
         runtime
-            .classify_with(ClassifyRequest::new(40, 0).with_request_id("request-1"))
+            .classify_with(
+                ClassifyRequest::new(40, 0).with_request_id("request-1"),
+                WorkerInputRows::empty(),
+            )
             .await
             .unwrap();
 
@@ -1219,7 +1308,11 @@ mod tests {
 
     #[async_trait]
     impl RequestClassifier for OrderingClassifier {
-        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        fn classify(
+            &mut self,
+            request: ClassifyRequest,
+            _workers: WorkerCandidates<'_>,
+        ) -> ClassifyFuture {
             let _ = self
                 .observed
                 .send(format!("classify:{}", request.request_id().unwrap_or("")));
@@ -1274,7 +1367,10 @@ mod tests {
         let classify_runtime = Arc::clone(&runtime);
         let classify = tokio::spawn(async move {
             classify_runtime
-                .classify_with(ClassifyRequest::new(1, 0).with_request_id("reused"))
+                .classify_with(
+                    ClassifyRequest::new(1, 0).with_request_id("reused"),
+                    WorkerInputRows::empty(),
+                )
                 .await
         });
         tokio::task::yield_now().await;
