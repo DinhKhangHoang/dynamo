@@ -329,6 +329,7 @@ impl<'a> WorkerCacheInputs<'a> {
 pub struct WorkerLoadInput {
     pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
+    pub(crate) active_decode_blocks: usize,
     pub(crate) decode_cost_blocks: f64,
     pub(crate) active_requests: usize,
 }
@@ -524,6 +525,7 @@ impl WorkerLoadInput {
         Self {
             available: true,
             active_prefill_tokens: load.active_prefill_tokens,
+            active_decode_blocks: load.active_decode_blocks,
             decode_cost_blocks: load.potential_decode_blocks() as f64,
             active_requests: load.active_requests,
         }
@@ -560,7 +562,17 @@ impl WorkerLoadInput {
         self.active_prefill_tokens
     }
 
-    /// Return the projected active decode footprint in KV blocks.
+    /// Return the KV blocks this worker's active requests hold. Unlike
+    /// [`decode_cost_blocks`](Self::decode_cost_blocks), this excludes the incoming request.
+    /// Counts each request's prompt blocks, plus the blocks generation adds only when the
+    /// router runs with `--router-track-output-blocks` (off by default). Zero when the router
+    /// runs with `--no-router-track-active-blocks`, as the prefill KV router always does.
+    pub fn active_decode_blocks(&self) -> usize {
+        self.active_decode_blocks
+    }
+
+    /// Return the projected active decode footprint in KV blocks, including the incoming
+    /// request's blocks not already active on this worker.
     pub fn decode_cost_blocks(&self) -> f64 {
         self.decode_cost_blocks
     }
