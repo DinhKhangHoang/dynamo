@@ -7,7 +7,7 @@ mod config;
 mod inputs;
 mod progress;
 mod registry;
-pub use inputs::{RequestClassifierContext, RequestClassifierWorker};
+pub use inputs::RouterContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 
 pub(crate) use config::RawRequestClassifierConfig;
@@ -34,7 +34,7 @@ use crate::scheduling::{
 };
 
 #[derive(Debug)]
-pub struct ClassifyRequest {
+pub struct RequestClassificationContext {
     pub(crate) classification_id: u64,
     request_id: Option<String>,
     policy_class: Option<String>,
@@ -65,7 +65,7 @@ pub(crate) struct ClassificationOverrides {
     pub(crate) worker_selection_target: Option<Option<WorkerAffinityTarget>>,
 }
 
-impl ClassifyRequest {
+impl RequestClassificationContext {
     #[cfg(test)]
     pub(crate) fn new(input_tokens: usize, initial_cached_tokens: usize) -> Self {
         Self::with_timing(input_tokens, initial_cached_tokens, Instant::now())
@@ -180,7 +180,8 @@ impl ClassifyRequest {
         self.overrides.policy_class = Some(policy_class.into());
     }
 
-    pub fn input_tokens(&self) -> usize {
+    /// Input sequence length in tokens, the size the scheduler uses.
+    pub fn isl_tokens(&self) -> usize {
         self.input_tokens
     }
 
@@ -188,7 +189,7 @@ impl ClassifyRequest {
     ///
     /// This is an owned snapshot of the host's existing scheduling input, taken
     /// before classification. Each entry represents a complete tracking block;
-    /// use the factory's [`RequestClassifierContext::block_size`] for its token
+    /// use the factory's [`RouterContext::block_size`] for its token
     /// unit. A partial trailing block is not covered. `None` preserves missing
     /// tracking data; `Some(&[])` preserves a present, empty sequence.
     ///
@@ -309,8 +310,13 @@ pub enum ClassifyEvent {
 
 /// An independently pollable classifier invocation. See [`RequestClassifier`]
 /// for why this is a `'static` future rather than `async fn`.
-pub type ClassifyFuture =
-    Pin<Box<dyn Future<Output = Result<ClassifyRequest, Box<ClassifierError>>> + Send + 'static>>;
+pub type ClassifyFuture = Pin<
+    Box<
+        dyn Future<Output = Result<RequestClassificationContext, Box<ClassifierError>>>
+            + Send
+            + 'static,
+    >,
+>;
 
 /// User-provided request classifier.
 ///
@@ -330,7 +336,7 @@ pub type ClassifyFuture =
 /// }
 ///
 /// impl RequestClassifier for Pauser {
-///     fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+///     fn classify(&mut self, request: RequestClassificationContext, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
 ///         // Clone the handle into the future; `self` cannot be borrowed.
 ///         let state = Arc::clone(&self.state);
 ///         Box::pin(async move {
@@ -373,7 +379,7 @@ pub trait RequestClassifier: Send + 'static {
     /// snapshot when it later picks a worker, so it can pick a different worker.
     fn classify(
         &mut self,
-        request: ClassifyRequest,
+        request: RequestClassificationContext,
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })

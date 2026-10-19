@@ -448,10 +448,10 @@ worker_selection:
         assert!(!plugins.is_empty());
         assert!(plugins.worker_selection().is_none());
         let _first = plugins.request_classifier().unwrap()(
-            crate::plugins::request_classifier::RequestClassifierContext::new(16, Vec::new),
+            crate::plugins::request_classifier::RouterContext::new(16, Vec::new),
         );
         let _second = plugins.clone().request_classifier().unwrap()(
-            crate::plugins::request_classifier::RequestClassifierContext::new(16, Vec::new),
+            crate::plugins::request_classifier::RouterContext::new(16, Vec::new),
         );
         assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
         assert!(

@@ -9,12 +9,12 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use super::{RequestClassifier, RequestClassifierContext};
+use super::{RequestClassifier, RouterContext};
 use crate::config::KvRouterConfig;
 
 /// Creates one classifier per routed model during router construction, not per request.
 pub type RequestClassifierFactory =
-    Arc<dyn Fn(RequestClassifierContext) -> Box<dyn RequestClassifier> + Send + Sync>;
+    Arc<dyn Fn(RouterContext) -> Box<dyn RequestClassifier> + Send + Sync>;
 
 /// Validates plugin-owned YAML parameters once and returns a per-router factory.
 pub type RequestClassifierProvider = Arc<
@@ -194,7 +194,7 @@ request_classifier:
         registry.register("test", Arc::new(provider)).unwrap();
         let (_policy, valid_config) = config(VALID_CONFIG);
         let factory = registry.resolve(&valid_config).unwrap().unwrap();
-        let classifier = factory(RequestClassifierContext::new(16, Vec::new));
+        let classifier = factory(RouterContext::new(16, Vec::new));
         let _: Box<dyn RequestClassifier> = classifier;
 
         let (_policy, invalid) = config(
