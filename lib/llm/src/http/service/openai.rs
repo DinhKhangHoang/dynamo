@@ -1411,7 +1411,11 @@ async fn completions_single(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -1691,6 +1695,10 @@ async fn completions_batch(
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
+                // The echo names its choice by index too; keep them together.
+                if let Some(echo) = data.echo.as_mut() {
+                    echo.choice_index += prompt_idx_u32 * n_u32;
+                }
             }
             response
         });
@@ -1761,7 +1769,11 @@ async fn completions_batch(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -3371,7 +3383,7 @@ fn deduplicate_stream_roles(
 
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
-    if resp.nvext.is_some() {
+    if resp.nvext.is_some() || resp.echo.is_some() {
         return false;
     }
     resp.inner.usage.is_none()
@@ -3567,6 +3579,26 @@ async fn chat_completions(
     if let Err(err_response) = validate_chat_completion_stream_options(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
+    }
+
+    // Beam route: a `strict` tool whose schema is outside OpenAI's strict subset is
+    // served as non-strict instead of rejected (see
+    // `tool_choice::relax_noncompliant_strict_tools_for_beam`). The model lookup is
+    // repeated below with its own error handling, so a missing model is reported there.
+    if let Ok((_, model_parsing)) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+    {
+        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+            &mut request,
+            model_parsing.tool_call_parser.as_deref(),
+            model_parsing.reasoning_parser.as_deref(),
+        );
+        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+            &mut request,
+            model_parsing.tool_call_parser.as_deref(),
+            model_parsing.reasoning_parser.as_deref(),
+        );
     }
 
     // Handle Rest of Validation Errors
@@ -8356,6 +8388,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8386,6 +8419,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8639,6 +8673,7 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8672,6 +8707,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8704,6 +8740,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8736,6 +8773,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8768,6 +8806,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8802,6 +8841,7 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -11026,6 +11066,7 @@ mod tests {
                 usage,
             },
             nvext: None,
+            echo: None,
         }
     }
 
@@ -11082,6 +11123,7 @@ mod tests {
                 usage: Some(usage),
             },
             nvext: None,
+            echo: None,
         }
     }
 
