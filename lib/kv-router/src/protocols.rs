@@ -1669,10 +1669,11 @@ impl RouterEvent {
 
     pub fn targets_primary(&self) -> Result<bool, UnsupportedResidencyDomain> {
         if let Some(scope) = self.reset_scope()? {
-            return Ok(!matches!(
-                scope,
-                ResetScope::Domain(ResidencyDomain::CacheOwner)
-            ));
+            // Retained GPU storage is independent of the engine's Device
+            // cache. Its explicit clear must never reset native execution
+            // residency; legacy Device/CPU reset behavior remains unchanged.
+            return Ok(self.storage_tier != StorageTier::GpuDirect
+                && !matches!(scope, ResetScope::Domain(ResidencyDomain::CacheOwner)));
         }
         self.resolved_residency_domain()?;
         Ok(self.storage_tier == StorageTier::Device)
@@ -2925,5 +2926,26 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
+    }
+
+    #[test]
+    fn retained_gpu_clear_never_targets_native_primary_but_legacy_clear_still_does() {
+        for tier in [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::GpuDirect,
+        ] {
+            let event = RouterEvent::with_storage_tier(
+                7,
+                KvCacheEvent {
+                    event_id: 1,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                tier,
+            );
+            assert_eq!(event.targets_primary(), Ok(tier != StorageTier::GpuDirect));
+            assert_eq!(event.reset_scope(), Ok(Some(ResetScope::All)));
+        }
     }
 }
