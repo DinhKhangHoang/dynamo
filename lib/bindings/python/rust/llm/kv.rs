@@ -1432,7 +1432,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: dynamo_kv_router::protocols::OverlapScores,
+    pub(super) inner: dynamo_kv_router::protocols::OverlapScores,
 }
 
 #[pymethods]

@@ -386,6 +386,13 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::offline_router::OfflineRouter>()?;
+    m.add_class::<llm::offline_router::SessionAffinity>()?;
+    m.add_class::<llm::offline_router::AffinityHold>()?;
+    m.add_class::<llm::offline_router::AffinityLease>()?;
+    m.add_function(wrap_pyfunction!(
+        llm::offline_router::subagent_group_affinity_id,
+        m
+    )?)?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;

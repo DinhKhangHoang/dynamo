@@ -2779,31 +2779,68 @@ class KvStateAttachmentOwner:
         ...
 
 class OfflineRouter:
-    """Host-controlled native routing without an Endpoint or simulator dependency.
+    """Native LocalScheduler using host-owned time, without an Endpoint.
 
-    Configuration schema version 1 contains role (aggregated/prefill/decode),
-    dp_size, num_workers, block_size, num_gpu_blocks and optional
-    max_num_batched_tokens, router_config, affinity, capture_decisions,
-    selector_seed. Affinity accepts mode (session/sibling_group) and ttl_seconds.
-
-    The host advances virtual milliseconds and explicitly commits or aborts each
-    selected request. A command failure permanently poisons the handle. Calls
-    are synchronous and must run on the constructing thread outside an active
-    Tokio runtime.
+    Calls must stay on the constructing thread outside an active Tokio runtime.
+    The host supplies RadixTree overlaps, advances milliseconds, and explicitly
+    frees each booking. Roles, affinity composition and dispatch are host-owned.
     """
-
-    def __init__(self, config_json: str) -> None: ...
-
-    def call_json(self, command_json: str) -> str:
-        """Execute a version-1 JSON command and return its result/status envelope.
-
-        Commands: status, snapshot, place, observe, advance_clock,
-        dispatch_committed, dispatch_aborted, request_terminal,
-        prefill_completed, cancel_pending, worker_ready, worker_draining,
-        worker_removed, topology_settled. Every response has result,
-        pending_count and next_wakeup_ms; snapshot also includes evidence.
-        """
+    def __init__(
+        self,
+        block_size: int,
+        num_workers: int,
+        dp_size: int,
+        num_gpu_blocks: int,
+        max_num_batched_tokens: Optional[int] = None,
+        router_config_json: str = "{}",
+        selector_seed: Optional[int] = None,
+    ) -> None: ...
+    def submit(
+        self,
+        request_id: str,
+        input_length: int,
+        max_output_tokens: int,
+        overlaps: OverlapScores,
+        local_block_hashes: List[int],
+        sequence_hashes: Optional[List[int]] = None,
+        tokens: Optional[List[int]] = None,
+        affinity_target: Optional[Tuple[int, int]] = None,
+        priority: float = 0,
+        strict_priority: int = 0,
+        policy_class: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None: ...
+    def poll(self) -> List[Tuple[str, int, int, int, int]]:
+        """Admitted (request ID, worker ID, DP rank, overlap blocks, best overlap blocks)."""
         ...
+    def advance_clock(self, now_ms: float) -> None: ...
+    def cancel(self, request_id: str) -> bool: ...
+    def prefill_complete(self, request_id: str) -> None: ...
+    def free(self, request_id: str) -> None: ...
+    def add_worker(self, worker_id: int) -> None: ...
+    def remove_worker(self, worker_id: int) -> None: ...
+    def unregister_worker(self, worker_id: int) -> None: ...
+    @property
+    def pending_count(self) -> int: ...
+
+class SessionAffinity:
+    """Native session table. Advance time before acquiring, committing or releasing."""
+    def __init__(self, ttl_seconds: float) -> None: ...
+    def advance_clock(self, now_ms: float) -> None: ...
+    def try_acquire(self, key: str) -> Optional[AffinityHold]: ...
+    def commit(
+        self, hold: AffinityHold, worker_id: int, dp_rank: int
+    ) -> AffinityLease: ...
+
+class AffinityHold:
+    @property
+    def target(self) -> Optional[Tuple[int, int]]: ...
+    def release(self) -> None: ...
+
+class AffinityLease:
+    def release(self) -> None: ...
+
+def subagent_group_affinity_id(parent_session_id: str) -> str: ...
 
 class KvRouter:
     """
