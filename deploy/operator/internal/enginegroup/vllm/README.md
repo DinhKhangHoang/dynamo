@@ -35,18 +35,52 @@ and native identity remapping are not supported by this adapter.
 
 ## Remaining integration
 
-### Bootstrap is a launch concern
+### Launch-only bootstrap
 
 Each allocation uses one template. Its resolved launch assignment supplies stable
 group and member identities, rank, rendezvous, initial/join role, and the
 operation-bound DP target. All joiners receive the full resize target, not
 `rank + 1`. Initial participants form one complete world without a synthetic grow.
 
-Assignment acceptance must be recoverable and bound to the exact Pod/process
-incarnation. It must remain observable independently of engine initialization.
-Do not wait for inference readiness, registration, or a callback blocked behind
-engine construction before submitting the resize that lets a joiner initialize.
-Bootstrap delivery is not implemented here.
+The integration slice implements Pod-UID-bound launch assignments through the
+`nvidia.com/dynamo-vllm-launch` Pod annotation and a Downward API volume:
+
+```text
+Initial world: immutable native declaration + initial size
+Growth:       persisted capacity target + exact joining Pod UID
+                                |
+                      Go launch assignment
+                                |
+                  Pod annotation / Downward API
+                                |
+              launch-only Python entrypoint -> exec native vLLM
+```
+
+`VLLMGroveCapacity` reuses Grove's member-clique `/scale` and publishes joining
+assignments when Grove creates the Pods. Every joiner receives the complete
+resize target. Initial formation uses the same template without a synthetic grow.
+Assignments are immutable, published with Pod UID and resource-version
+preconditions, and replayed without relaunching retained processes. A replacement
+does not inherit the old Pod's assignment. Shrink and replacement remain outside
+this growth-only capacity adapter.
+
+Creation seeds an empty launch-binding record on the Engine Group. Before any
+command is published, capacity reconciliation persists each slot's exact Pod UID
+and assignment digest there, then waits for that cached observation. The record
+survives Pod deletion; a new occupant or lost binding fails closed instead of
+restarting initial formation. It records launch identity, not engine transaction
+phases. Existing Group and Pod lifecycle finalizers must protect effects first.
+
+The launcher has no Kubernetes credentials, engine control loop, proxy, or
+discovery owner. It replaces itself with native vLLM. A launch receipt makes
+allocation readiness observable before the joiner's API is available; it proves
+only assignment consumption, never membership, health, verification, or admission.
+Container restarts are prohibited. The Pod-bound launch lifetime and vLLM's native
+API instance ID remain distinct and require correlation by the runtime resolver.
+
+Do not wait for inference readiness or registration before submitting the resize
+that lets a joiner initialize. Conversely, do not register a joiner because its
+Pod or launch receipt is ready.
 
 ### Admission belongs in the existing worker
 
@@ -113,6 +147,34 @@ They do not validate real vLLM startup, inference, or discovery integration.
 
 The next slice must prove bootstrap without a joiner-readiness cycle, shared-worker
 admission at startup and recovery, topology loss during registration, nonblocking
-target submission during drain, and independent engine/sidecar restarts. The DGD
-profile, Grove rendering, traffic adapter, and serving verifier remain disabled.
+target submission during drain, and independent engine/sidecar restarts. The
+bootstrap renderer and Grove capacity/launch collaborator are covered by CPU and
+API-server tests. The DGD pathway now resolves the immutable native declaration,
+renders one PCSG with one member clique, seeds the child once, and rolls up
+engine-authoritative readiness without resetting its live scale target.
+
+Shared graph assembly and DGD child reconciliation select a backend without
+interpreting its engine geometry. The vLLM renderer owns native profile validation,
+launch preparation and allocation probes; it reuses the standard Grove Pod
+construction for metadata, secrets, resources and placement. Runtime composition,
+not the capacity adapter, assembles native membership clients.
+
+`ResolveVLLMGroveCapacity` verifies the complete DGD/PCS/PCSG/clique ownership
+chain and derives rendezvous from the exact rank-zero Pod. `ResolveVLLMMembership`
+composes direct per-Pod clients with the native membership adapter and a journal
+scoped to the physical clique UID. Resolution uses the production Pod-cache
+projection and does not contact vLLM: an API-unready joiner must not block launch
+delivery or membership preparation. Pod-bound launch lifetime remains separate
+from the native API instance ID pinned by membership observation.
+
+These pieces are not registered as a complete production RuntimeProvider.
+The admission webhook still rejects DGD opt-in and the default runtime remains
+unavailable. Worker traffic admission/drain, topology-bound serving verification,
+and startup composition that delivers initial launches before native observation
+remain required before deployment can be enabled. No synthetic admission or
+health-only verification is substituted for those contracts.
 The SGLang PoC's logical-only admission is not a replacement for this contract.
+
+This slice changes no API fields or generated schema. Including `engineGroup` in
+`UsesPCSG` selects its workload shape only; the existing hub-only creation block
+continues to use its unchanged conversion/preservation rules.

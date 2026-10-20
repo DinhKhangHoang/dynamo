@@ -20,6 +20,11 @@ type vllmProfileOption struct {
 }
 
 var vllmProfileOptions = []vllmProfileOption{
+	{name: "--host"},
+	{name: "--port"},
+	{name: "--uds"},
+	{name: "--ssl-keyfile"},
+	{name: "--ssl-certfile"},
 	{name: "--tensor-parallel-size", aliases: []string{"-tp"}},
 	{name: "--pipeline-parallel-size", aliases: []string{"-pp"}},
 	{name: "--decode-context-parallel-size", aliases: []string{"-dcp"}},
@@ -29,6 +34,8 @@ var vllmProfileOptions = []vllmProfileOption{
 	{name: "--data-parallel-rank", aliases: []string{"-dpn"}},
 	{name: "--data-parallel-start-rank", aliases: []string{"-dpr"}},
 	{name: "--data-parallel-backend", aliases: []string{"-dpb"}},
+	{name: "--data-parallel-address", aliases: []string{"-dpa"}},
+	{name: "--data-parallel-rpc-port", aliases: []string{"-dpp"}},
 	{name: "--distributed-executor-backend"},
 	{name: "--nnodes", aliases: []string{"-n"}},
 	{name: "--node-rank", aliases: []string{"-r"}},
