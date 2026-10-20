@@ -419,7 +419,9 @@ impl KvEventSourceRequirement {
         // A donor is a cache consumer even when decode execution uses load only.
         // Do not change the selection policy's inputs or overlap weight to obtain
         // this subscription: donor discovery must not affect decode scheduling.
-        if worker_role == Some(WorkerType::Decode) && config.enable_decode_to_prefill_reuse {
+        if worker_role == Some(WorkerType::Decode)
+            && (config.enable_decode_to_prefill_reuse || config.enable_decode_to_prefill_gpu_reuse)
+        {
             return Self::DecodeTransferSource;
         }
         if !inputs.contains(WorkerInputs::CACHE) {
@@ -989,6 +991,13 @@ impl KvRouter {
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    pub(crate) async fn query_local_gpu_direct_prefix(
+        &self,
+        query: &dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
+    ) -> Result<Option<usize>, dynamo_kv_router::services::selection::SelectionError> {
+        self.selection.query_local_gpu_direct_prefix(query).await
     }
 
     pub(crate) async fn query_transfer_sources(
@@ -2131,6 +2140,13 @@ mod tests {
             KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
             KvEventSourceRequirement::NotRequired
         );
+        config.enable_decode_to_prefill_gpu_reuse = true;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
+            KvEventSourceRequirement::DecodeTransferSource
+        );
+        assert!(!inputs.contains(WorkerInputs::CACHE));
+        config.enable_decode_to_prefill_gpu_reuse = false;
         config.enable_decode_to_prefill_reuse = true;
         config.use_remote_indexer = true;
         assert_eq!(
