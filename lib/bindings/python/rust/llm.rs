@@ -33,6 +33,7 @@ pub mod kv_state_agent;
 pub mod local_model;
 pub mod lora;
 pub mod model_card;
+pub mod offline_router;
 pub mod preprocessor;
 pub mod replay;
 pub mod routed_engine;

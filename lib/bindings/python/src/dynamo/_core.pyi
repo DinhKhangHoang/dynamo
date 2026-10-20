@@ -2778,6 +2778,33 @@ class KvStateAttachmentOwner:
     async def close(self) -> None:
         ...
 
+class OfflineRouter:
+    """Host-controlled native routing without an Endpoint or simulator dependency.
+
+    Configuration schema version 1 contains role (aggregated/prefill/decode),
+    dp_size, num_workers, block_size, num_gpu_blocks and optional
+    max_num_batched_tokens, router_config, affinity, capture_decisions,
+    selector_seed. Affinity accepts mode (session/sibling_group) and ttl_seconds.
+
+    The host advances virtual milliseconds and explicitly commits or aborts each
+    selected request. A command failure permanently poisons the handle. Calls
+    are synchronous and must run on the constructing thread outside an active
+    Tokio runtime.
+    """
+
+    def __init__(self, config_json: str) -> None: ...
+
+    def call_json(self, command_json: str) -> str:
+        """Execute a version-1 JSON command and return its result/status envelope.
+
+        Commands: status, snapshot, place, observe, advance_clock,
+        dispatch_committed, dispatch_aborted, request_terminal,
+        prefill_completed, cancel_pending, worker_ready, worker_draining,
+        worker_removed, topology_settled. Every response has result,
+        pending_count and next_wakeup_ms; snapshot also includes evidence.
+        """
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.

@@ -37,6 +37,7 @@ from dynamo._core import ModelType as ModelType
 from dynamo._core import (
     MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
 )
+from dynamo._core import OfflineRouter as OfflineRouter
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
