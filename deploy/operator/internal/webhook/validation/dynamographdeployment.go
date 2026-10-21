@@ -376,6 +376,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
+				parentEnv:                         spec.Env,
 			},
 		)...)
 	}

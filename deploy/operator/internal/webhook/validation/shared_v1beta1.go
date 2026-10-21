@@ -64,6 +64,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	providerOverridesSupported        bool
 	workloadProvider                  string
 	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	parentEnv                         []corev1.EnvVar
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -89,12 +90,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 
-	// Reject the declarative opt-in until its DGD workload pathway is implemented.
+	// Admit only the backend/transport whose complete workload and traffic contracts are implemented.
 	if spec.EngineGroup != nil {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath.Child("engineGroup"),
-			"DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept",
-		))
+		main := dynamo.GetMainContainer(spec)
+		if !options.grovePathway || main == nil || !dynamo.IsVLLMWorkerLaunch(dynamo.VLLMProfileGeometrySource{Command: main.Command, Args: main.Args}) {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("engineGroup"),
+				"DGD Engine Groups require Grove and the supported vLLM Python-worker profile"))
+		} else if _, _, err := dynamo.ResolveVLLMComponentEngineGroup(spec, options.parentEnv); err != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("engineGroup"), err.Error()))
+		}
 	}
 
 	// Enforce Grove-only availability semantics before validating later fields.

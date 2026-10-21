@@ -7,6 +7,7 @@ package enginegroup
 
 import (
 	"fmt"
+	"net/http"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -23,6 +24,9 @@ func Setup(mgr ctrl.Manager, opts SetupOptions) error {
 	provider := opts.RuntimeProvider
 	if provider == nil {
 		provider = unavailableEngineGroupRuntimeProvider{}
+		if opts.GroveEnabled {
+			provider = &VLLMWorkerRuntimeProvider{Client: mgr.GetClient(), HTTP: &http.Client{}}
+		}
 	}
 
 	// Register reconciliation and watches together at the subsystem composition root.

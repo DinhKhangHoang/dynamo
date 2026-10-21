@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build this image from this branch with vLLM #62082; the tag is not published.
+# This is a correctness smoke configuration, not a performance recipe.
+# Select an MoE model/parallel configuration that fits the available GPUs and
+# satisfies the installed vLLM version's expert-placement constraints.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-enginegroup
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.5.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: docker.io/jmancuso768/dynamo-vllm-enginegroup:dev
+          command: [python3, -m, dynamo.frontend]
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.5.0"
+    replicas: 1
+    engineGroup:
+      initialSize: 2
+      policy: {minSize: 2, maxSize: 4}
+    podTemplate:
+      spec:
+        restartPolicy: Never
+        containers:
+        - name: main
+          image: docker.io/jmancuso768/dynamo-vllm-enginegroup:dev
+          command: [python3, -m, dynamo.vllm]
+          args:
+          - --model=Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size=1
+          - --data-parallel-size=2
+          - --data-parallel-rank=0
+          - --data-parallel-size-local=1
+          - --distributed-executor-backend=mp
+          - --enable-expert-parallel
+          - --enable-eplb
+          - --enable-elastic-ep
+          - --elastic-ep-max-dp-size=4
+          - --gpu-memory-utilization=0.8
+          - --max-model-len=2048
+          resources:
+            limits:
+              nvidia.com/gpu: "1"

@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 This package implements the Go membership adapter for vLLM's correlated external
 Elastic EP API in [vLLM #62082](https://github.com/vllm-project/vllm/pull/62082).
-It does not launch engines, manage discovery registration, or authorize Pod
-release. No vLLM Engine Group deployment path is enabled yet.
+It also observes topology-bound serving verification and real discovery registration
+through the existing Dynamo Python worker. Grove-backed DGD creation and growth are
+enabled for that narrow profile. Physical release and failure recovery remain gated.
 
 ## Implemented boundary
 
@@ -23,17 +24,43 @@ of a fully retired suffix. The profile requires one native DP member per
 allocation. Packed allocations, survivor masking, arbitrary selected retirement,
 and native identity remapping are not supported by this adapter.
 
+### Existing Python-worker transport
+
+The Python worker forwards external ownership through
+`/engine/control/scale_elastic_ep` and `/engine/control/is_scaling_elastic_ep`.
+`NewWorkerClient` uses these routes with the same native request/status codec as
+`NewClient`; vLLM still owns operation serialization, replay, and topology
+certainty. Dynamo requires the operation and expected-instance IDs and does not
+turn a lost response into rejection or take the legacy Ray restart path.
+The existing Ray controls retain their behavior.
+
+This transport requires #62082. A managed component declares `python3 -m
+dynamo.vllm`; its launch-only bootstrap supplies rank and rendezvous without
+replacing the existing worker lifecycle. Native-only launches are still usable by
+the low-level adapter but cannot opt into this complete deployment pathway.
+
+The worker starts its inference listener without discovery publication. Initial
+formation and every committed growth must pass a one-token inference probe at
+every rank. The worker runs this check and registers independently of the
+controller. Proof is bound to the native API instance and committed operation/epoch;
+the controller correlates observed evidence with its topology generation and Pod UID.
+Preparation can keep the old topology serving; the native request gate, not the
+duration of a resize call, determines whether inference is paused. Native evidence
+is checked again after registration to fence an in-flight topology change.
+Registration failure is inconclusive and retryable, not permission
+to restart the engine.
+
 ## Ownership
 
 | Owner | Responsibility |
 |---|---|
-| Engine Group controller | Persist targets, order operations, correlate identities, verify serving, and authorize release. |
+| Engine Group controller | Persist targets, order operations, correlate observed serving evidence, and authorize release. |
 | Workload manager | Allocate and place capacity, expose stable slots and Pod UIDs, and perform authorized release. |
 | Engine entrypoint | Resolve one allocation's launch assignment and start its native engine. |
 | vLLM | Execute membership transactions and expose topology, engine lifetime, admission closure, and drain evidence. |
-| Existing Dynamo worker/sidecar | Own serving lifecycle, discovery registration, and KV preparation. Apply Engine Group permission as an additional registration condition. |
+| Existing Dynamo worker/sidecar | Follow native serving readiness, verify serving progress, and manage registration and KV prerequisites. Honor outstanding withdrawal intent; no controller serving grant. |
 
-## Remaining integration
+## Bootstrap and lifecycle
 
 ### Launch-only bootstrap
 
@@ -53,7 +80,7 @@ Growth:       persisted capacity target + exact joining Pod UID
                                 |
                   Pod annotation / Downward API
                                 |
-              launch-only Python entrypoint -> exec native vLLM
+              launch-only Python entrypoint -> exec Dynamo vLLM worker
 ```
 
 `VLLMGroveCapacity` reuses Grove's member-clique `/scale` and publishes joining
@@ -72,7 +99,7 @@ restarting initial formation. It records launch identity, not engine transaction
 phases. Existing Group and Pod lifecycle finalizers must protect effects first.
 
 The launcher has no Kubernetes credentials, engine control loop, proxy, or
-discovery owner. It replaces itself with native vLLM. A launch receipt makes
+discovery owner. It replaces itself with the assigned native server or Dynamo worker. A launch receipt makes
 allocation readiness observable before the joiner's API is available; it proves
 only assignment consumption, never membership, health, verification, or admission.
 Container restarts are prohibited. The Pod-bound launch lifetime and vLLM's native
@@ -82,23 +109,20 @@ Do not wait for inference readiness or registration before submitting the resize
 that lets a joiner initialize. Conversely, do not register a joiner because its
 Pod or launch receipt is ready.
 
-### Admission belongs in the existing worker
+### Serving readiness belongs in the existing worker
 
-The shared worker is the intended owner of registration. An Engine Group adds
-permission for an exact member incarnation and topology; it must not create
-another worker, serving loop, or discovery owner.
+The existing worker owns registration. No additional controller permission or
+controller acknowledgment is required, including after initial formation and growth.
 
 Registration requires all of:
 
-- Current controller permission for this member and topology.
 - Authoritative committed membership and the required topology-bound serving proof.
 - Engine serving readiness and valid KV state for the current engine lifetime.
 - No shutdown or withdrawal in progress.
 
-Every registration path must honor the same permission, including startup,
+Every registration path must use the same native evidence, including startup,
 resume, and health/KV recovery. After an asynchronous registration, recheck its
-evidence before acknowledging admission; if it changed, withdraw and retain the
-unconverged target. Accepted permission and observed registration are distinct.
+evidence; if it changed, withdraw. Registration is an observation, not a controller target.
 
 Keep target acceptance separate from slow registration and drain effects. Status
 reads and target retries must not wait on a lock held for an inference request's
@@ -107,7 +131,7 @@ request counter cannot prove engine drain once requests bypass that wrapper.
 
 Engine lifetime, worker/sidecar lifetime, discovery identity, and Pod UID are
 separate identities. Restarting a sidecar must not relaunch an engine, inherit
-permission without revalidation, or be mistaken for a new engine lifetime.
+serving proof without revalidation, or be mistaken for a new engine lifetime.
 
 ### Sidecar dependencies
 
@@ -120,17 +144,17 @@ and KV recovery in [#16754](https://github.com/ai-dynamo/dynamo/pull/16754) and
 [#16755](https://github.com/ai-dynamo/dynamo/pull/16755). Engine Group admission
 must compose with that lifecycle rather than replace it.
 
-The next Rust slice should extend the shared worker on top of #16752 and be
-validated with the complete stack through #16755. Controller permission is
-separate from operator pause/resume intent: recovery or resume must not override
-an Engine Group withdrawal. Permission/status controls must be reachable before
-serving registration and remain available during recovery; waiting for permission
-behind the serving gate would deadlock startup. Withholding permission is not an
-engine failure and must not trigger engine replacement or KV recovery.
+The separate Rust admission draft [#16951](https://github.com/ai-dynamo/dynamo/pull/16951)
+extends the shared worker on top of #16752. The generic unregistered-listener
+primitive is shared with this Python integration; sidecar lifecycle code is not
+pulled into the Python worker. The positive-permission design in that separate
+draft needs alignment with readiness-driven registration; it is not a dependency
+of this pathway. Status controls remain reachable before registration and during
+recovery. Expected inference unavailability is not authority to restart the engine.
 
 The stack's health and KV checks do not prove Engine Group membership or
 topology-bound serving verification. Native identity binding and real admission
-integration remain required before enabling the vLLM deployment path.
+integration remain required before enabling the sidecar deployment path.
 
 The inspected #62082 revision exposes correlated Elastic EP through Python and
 HTTP, not the native gRPC control service. The sidecar path still needs supported
@@ -141,15 +165,13 @@ conformance before those controls exist.
 
 ## Validation and delivery
 
-Current tests cover the Go HTTP client, exact all-rank resize delivery, native
-status correlation, and restart recovery of the durable membership binding.
-They do not validate real vLLM startup, inference, or discovery integration.
+CPU tests cover native protocol correlation, runtime-owned registration, initial
+verification without a synthetic resize, multi-rank append, ambiguous registration,
+topology changes during registration, pause/resume, and coordinator reconstruction
+at durable boundaries. API-server tests cover Grove Scale and Pod-UID-bound launch
+delivery. These are not real-engine or GPU end-to-end conformance results.
 
-The next slice must prove bootstrap without a joiner-readiness cycle, shared-worker
-admission at startup and recovery, topology loss during registration, nonblocking
-target submission during drain, and independent engine/sidecar restarts. The
-bootstrap renderer and Grove capacity/launch collaborator are covered by CPU and
-API-server tests. The DGD pathway now resolves the immutable native declaration,
+The DGD pathway resolves the immutable native declaration,
 renders one PCSG with one member clique, seeds the child once, and rolls up
 engine-authoritative readiness without resetting its live scale target.
 
@@ -167,13 +189,27 @@ projection and does not contact vLLM: an API-unready joiner must not block launc
 delivery or membership preparation. Pod-bound launch lifetime remains separate
 from the native API instance ID pinned by membership observation.
 
-These pieces are not registered as a complete production RuntimeProvider.
-The admission webhook still rejects DGD opt-in and the default runtime remains
-unavailable. Worker traffic admission/drain, topology-bound serving verification,
-and startup composition that delivers initial launches before native observation
-remain required before deployment can be enabled. No synthetic admission or
-health-only verification is substituted for those contracts.
-The SGLang PoC's logical-only admission is not a replacement for this contract.
+`VLLMWorkerRuntimeProvider` composes these pieces when Grove is enabled. Initial
+launch delivery runs only after lifecycle finalizers exist, and before engine
+observation. The runtime establishes serving proof without a controller request;
+the checkpoint records observed proof, not permission. Group-global negative traffic
+targets retain accepted withdrawal/drain intent across restarts. Native engines
+retain transaction authority.
+
+Only aggregated generation with one DP member per allocation is enabled: no
+LoRA, RL, pooling, disaggregation, packed allocations, process restart, shrink,
+replacement, or group retirement is claimed. In particular, discovery withdrawal
+is not reported as drain completion. Durable runtime retirement/drain delivery is
+not implemented by this worker transport; its adapter rejects every nonempty
+drain target. The growth-only adapters reject unsupported
+plans rather than silently weakening their safety contracts.
+
+[`poc.yaml`](poc.yaml) contains one DGD with its frontend and initial two-worker
+world. Build its image from this branch with vLLM #62082 first; the example tag
+is not a published image. After startup, scale the generated Engine Group (not
+the DGD's world count) to three. Capture the Engine Group status, exact Pod UIDs,
+native statuses, inference before/after growth, and discovery membership. GPU
+validation is still required before calling this path production-ready.
 
 This slice changes no API fields or generated schema. Including `engineGroup` in
 `UsesPCSG` selects its workload shape only; the existing hub-only creation block

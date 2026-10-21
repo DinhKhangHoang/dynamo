@@ -20,6 +20,7 @@ package validation_test
 import (
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"testing"
 
@@ -36,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -76,11 +78,34 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	}{
 		// Baseline create-path rules.
 		{
+			name:         "the checked-in one-DGD vLLM managed-growth smoke configuration is admissible",
+			deployment:   vllmEngineGroupSmokeDeployment(t),
+			wantProvider: "grove",
+		},
+		{
 			name: "engineGroup creation config is explicit but its workload pathway remains gated",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"},
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD Engine Groups require Grove and the supported vLLM Python-worker profile"},
+		},
+		{
+			name: "Grove vLLM Python worker opts into complete managed-growth admission",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = "vllm"
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = k8sptr.To[int32](1)
+				worker.EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "main", Image: "example.invalid/dynamo-vllm:elastic-ep",
+					Command: []string{"python3", "-m", "dynamo.vllm"},
+					Args: []string{"--model=model", "--data-parallel-size=2", "--data-parallel-rank=0", "--data-parallel-size-local=1",
+						"--tensor-parallel-size=1", "--distributed-executor-backend=mp", "--elastic-ep-max-dp-size=4",
+						"--enable-expert-parallel", "--enable-eplb", "--enable-elastic-ep"},
+					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1")}},
+				}}}}
+			}),
+			wantProvider: "grove",
 		},
 		{
 			name: "initialSize must satisfy the template policy independently of world count",
@@ -3167,6 +3192,21 @@ func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]an
 		t.Fatal("request spec.services.worker.volumeMounts[0] is not an object")
 	}
 	volumeMount["name"] = ""
+}
+
+func vllmEngineGroupSmokeDeployment(t *testing.T) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+	t.Log("load the actual managed-growth DGD through the same source-version admission chain")
+	payload, err := os.ReadFile("../../enginegroup/vllm/poc.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if err := yaml.UnmarshalStrict(payload, deployment); err != nil {
+		t.Fatal(err)
+	}
+	deployment.Namespace = "default"
+	return deployment
 }
 
 func betaDGDForAdmission(
