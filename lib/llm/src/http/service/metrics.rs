@@ -808,7 +808,10 @@ pub struct ResponseMetricCollector {
     // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
     // every chunk or output token. Each handle shares the underlying metric with its vec,
     // so observations are equivalent.
-    output_tokens_counter: prometheus::IntCounter,
+    // Output tokens are counted locally and flushed every `ITL_LOCAL_FLUSH_TOKENS` and on
+    // drop: the per-model counter is one atomic shared by every in-flight request, and
+    // adding to it on every token bounces its cache line between cores.
+    output_tokens_counter: prometheus::local::LocalIntCounter,
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
     itl_pending_tokens: u64,
@@ -1961,7 +1964,10 @@ impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
         // Resolve the per-model handles once (cheap clones of the vec entries) so the
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
-        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
+        let output_tokens_counter = metrics
+            .output_tokens_counter
+            .with_label_values(&[&model])
+            .local();
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
@@ -2165,8 +2171,11 @@ impl ResponseMetricCollector {
         // Store ISL for span recording on drop
         self.isl = isl;
 
-        // Increment the real-time output tokens counter
+        // Count output tokens locally; publish a batch once it reaches the ITL flush size.
         self.output_tokens_counter.inc_by(num_tokens as u64);
+        if self.output_tokens_counter.get() >= ITL_LOCAL_FLUSH_TOKENS {
+            self.output_tokens_counter.flush();
+        }
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
@@ -2266,6 +2275,8 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
+        // `LocalIntCounter` has no `Drop` flush of its own.
+        self.output_tokens_counter.flush();
         if let Some(histogram) = &self.inter_token_latency {
             histogram.flush();
         }
@@ -3149,6 +3160,7 @@ mod tests {
         let annotated = crate::types::Annotated::from_data(data);
 
         process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+        drop(collector);
 
         assert_eq!(
             metrics
@@ -3167,39 +3179,28 @@ mod tests {
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
+        let global = metrics.output_tokens_counter.with_label_values(&[model]);
 
-        // Create response collector
         let mut collector = metrics.clone().create_response_collector(model);
-
-        // Simulate first chunk (5 tokens)
         collector.observe_response(100, 5);
+        collector.observe_response(100, 58);
+        assert_eq!(
+            global.get(),
+            0,
+            "a partial local batch must remain unpublished"
+        );
 
-        // Verify counter incremented by 5
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 5);
+        collector.observe_response(100, 1);
+        assert_eq!(
+            global.get(),
+            ITL_LOCAL_FLUSH_TOKENS,
+            "the 64th pending output token must flush the local counter"
+        );
 
-        // Simulate second chunk (10 tokens)
-        collector.observe_response(100, 10);
-
-        // Verify counter incremented to 15
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 15);
-
-        // Simulate third chunk (7 tokens)
         collector.observe_response(100, 7);
-
-        // Verify counter incremented to 22
-        let counter_value = metrics
-            .output_tokens_counter
-            .with_label_values(&[model])
-            .get();
-        assert_eq!(counter_value, 22);
+        assert_eq!(global.get(), ITL_LOCAL_FLUSH_TOKENS);
+        drop(collector);
+        assert_eq!(global.get(), 71, "drop must publish the remaining tokens");
     }
 
     #[test]
@@ -3500,18 +3501,10 @@ mod tests {
             .get();
         assert_eq!(counter_value, 0);
 
-        // Add some tokens
+        // Add some tokens, then zero tokens again (should not change counter)
         collector.observe_response(100, 5);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model])
-                .get(),
-            5
-        );
-
-        // Try zero tokens again (should not change counter)
         collector.observe_response(100, 0);
+        drop(collector);
         assert_eq!(
             metrics
                 .output_tokens_counter
@@ -3534,42 +3527,13 @@ mod tests {
         let mut collector1 = metrics.clone().create_response_collector(model1);
         let mut collector2 = metrics.clone().create_response_collector(model2);
 
-        // Increment model1
         collector1.observe_response(100, 10);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model1])
-                .get(),
-            10
-        );
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model2])
-                .get(),
-            0
-        );
-
-        // Increment model2
         collector2.observe_response(200, 20);
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model1])
-                .get(),
-            10
-        );
-        assert_eq!(
-            metrics
-                .output_tokens_counter
-                .with_label_values(&[model2])
-                .get(),
-            20
-        );
-
-        // Increment model1 again
         collector1.observe_response(100, 5);
+        drop(collector1);
+        drop(collector2);
+
+        // Each model's counter receives only its own collector's tokens
         assert_eq!(
             metrics
                 .output_tokens_counter
