@@ -1201,6 +1201,11 @@ mod scalar_port_tests {
         for value in [-100.0000001, 100.0000001] {
             validate_logit_bias(&Some(HashMap::from([("+1".to_string(), json!(value))]))).unwrap();
         }
+        // A finite JSON number can overflow during Dynamo's f32 conversion.
+        assert_plain_error(
+            validate_logit_bias(&Some(HashMap::from([("1".to_string(), json!(1e300))]))),
+            "Logit bias for token '1' must be between -100 and 100, got inf",
+        );
         validate_logit_bias(&Some(HashMap::new())).unwrap();
 
         let entries = HashMap::from([

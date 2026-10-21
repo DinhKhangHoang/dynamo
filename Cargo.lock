@@ -2928,7 +2928,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "8.2.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=368b3c0251059d71e4d66b1589045d51f4631762#368b3c0251059d71e4d66b1589045d51f4631762"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=42ef9fe20b5b0dbc12f8515018b53b8b625d5b80#42ef9fe20b5b0dbc12f8515018b53b8b625d5b80"
 dependencies = [
  "async-openai",
  "derive_builder",
