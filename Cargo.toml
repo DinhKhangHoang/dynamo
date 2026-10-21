@@ -58,7 +58,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 # Draft validation-helper candidate; replace with its containing release before merge.
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b3d41b2a57f603838f06de0578190911f2957316" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "74d95661a6b9cba1d101a4a13de0da313c2f94c4" }
 
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }

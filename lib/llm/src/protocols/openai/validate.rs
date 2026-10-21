@@ -11,13 +11,6 @@ use dynamo_runtime::config::{
 };
 use serde_json::Value;
 
-pub use dynamo_protocols::validation::dynamo::{
-    MAX_FREQUENCY_PENALTY, MAX_LOGPROBS, MAX_MIN_P, MAX_N, MAX_PRESENCE_PENALTY,
-    MAX_REPETITION_PENALTY, MAX_TEMPERATURE, MAX_TOP_LOGPROBS, MAX_TOP_P, MIN_FREQUENCY_PENALTY,
-    MIN_LOGPROBS, MIN_MIN_P, MIN_N, MIN_PRESENCE_PENALTY, MIN_REPETITION_PENALTY, MIN_TEMPERATURE,
-    MIN_TOP_LOGPROBS, MIN_TOP_P,
-};
-
 use super::{
     common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
     tools::{ToolChoiceError, validate_openai_tool_choice},
@@ -27,15 +20,36 @@ use super::{
 // Hyperparameter Contraints
 //
 
+/// Minimum allowed value for OpenAI's `temperature` sampling option
+pub const MIN_TEMPERATURE: f32 = 0.0;
+/// Maximum allowed value for OpenAI's `temperature` sampling option
+pub const MAX_TEMPERATURE: f32 = 2.0;
 /// Allowed range of values for OpenAI's `temperature`` sampling option
 pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 
+/// Minimum allowed value for OpenAI's `top_p` sampling option
+pub const MIN_TOP_P: f32 = 0.0;
+/// Maximum allowed value for OpenAI's `top_p` sampling option
+pub const MAX_TOP_P: f32 = 1.0;
+
+/// Minimum allowed value for `min_p`
+pub const MIN_MIN_P: f32 = 0.0;
+/// Maximum allowed value for `min_p`
+pub const MAX_MIN_P: f32 = 1.0;
 /// Allowed range of values for `min_p`
 pub const MIN_P_RANGE: (f32, f32) = (MIN_MIN_P, MAX_MIN_P);
 
+/// Minimum allowed value for OpenAI's `frequency_penalty` sampling option
+pub const MIN_FREQUENCY_PENALTY: f32 = -2.0;
+/// Maximum allowed value for OpenAI's `frequency_penalty` sampling option
+pub const MAX_FREQUENCY_PENALTY: f32 = 2.0;
 /// Allowed range of values for OpenAI's `frequency_penalty` sampling option
 pub const FREQUENCY_PENALTY_RANGE: (f32, f32) = (MIN_FREQUENCY_PENALTY, MAX_FREQUENCY_PENALTY);
 
+/// Minimum allowed value for OpenAI's `presence_penalty` sampling option
+pub const MIN_PRESENCE_PENALTY: f32 = -2.0;
+/// Maximum allowed value for OpenAI's `presence_penalty` sampling option
+pub const MAX_PRESENCE_PENALTY: f32 = 2.0;
 /// Allowed range of values for OpenAI's `presence_penalty` sampling option
 pub const PRESENCE_PENALTY_RANGE: (f32, f32) = (MIN_PRESENCE_PENALTY, MAX_PRESENCE_PENALTY);
 
@@ -46,6 +60,23 @@ pub const MAX_LENGTH_PENALTY: f32 = 2.0;
 /// Allowed range of values for `length_penalty`
 pub const LENGTH_PENALTY_RANGE: (f32, f32) = (MIN_LENGTH_PENALTY, MAX_LENGTH_PENALTY);
 
+/// Maximum allowed value for `top_logprobs`
+pub const MIN_TOP_LOGPROBS: u8 = 0;
+/// Maximum allowed value for `top_logprobs`
+pub const MAX_TOP_LOGPROBS: u8 = 20;
+
+/// Minimum allowed value for `logprobs` in completion requests
+pub const MIN_LOGPROBS: u8 = 0;
+/// Maximum allowed value for `logprobs` in completion requests
+///
+/// Matches the chat `top_logprobs` limit and vLLM's default `--max-logprobs`,
+/// rather than the legacy OpenAI completions limit of 5.
+pub const MAX_LOGPROBS: u8 = 20;
+
+/// Minimum allowed value for `n` (number of choices)
+pub const MIN_N: u8 = 1;
+/// Maximum allowed value for `n` (number of choices)
+pub const MAX_N: u8 = 128;
 /// Allowed range of values for `n` (number of choices)
 pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
 
@@ -71,6 +102,10 @@ pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Both `/v1/messages` and `/v1/responses` define a 128-character tool-name limit.
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 128;
+/// Minimum allowed value for `repetition_penalty`
+pub const MIN_REPETITION_PENALTY: f32 = 0.0;
+/// Maximum allowed value for `repetition_penalty`
+pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 
 //
 // Shared Fields
@@ -284,25 +319,47 @@ pub fn validate_response_format_conflicts(
     Ok(())
 }
 
-/// Applies [Dynamo's temperature rule](dynamo_protocols::validation::dynamo::validate_temperature).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks an optional temperature against the OpenAI scalar range [0, 2].
+/// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_temperature(temperature)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(temp) = temperature
+        && !dynamo_protocols::validation::openai::is_valid_temperature(temp)
+    {
+        anyhow::bail!(
+            "Temperature must be between {} and {}, got {}",
+            MIN_TEMPERATURE,
+            MAX_TEMPERATURE,
+            temp
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's top_p rule](dynamo_protocols::validation::dynamo::validate_top_p).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks an optional top_p against the shared engine range (0, 1].
+/// None succeeds; zero, non-finite, or out-of-range values return Dynamo's plain-text error.
+/// Dynamo deliberately uses the engine rule rather than OpenAI's inclusive lower bound.
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_top_p(top_p)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(p) = top_p
+        && !dynamo_protocols::validation::shared::is_valid_top_p(p)
+    {
+        anyhow::bail!(
+            "Top_p must be between {} and {}, got {}",
+            MIN_TOP_P,
+            MAX_TOP_P,
+            p
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's top_k rule](dynamo_protocols::validation::dynamo::validate_top_k).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks Dynamo's top_k admission rule without rewriting its disabled sentinels.
+/// None and values >= -1 succeed; smaller values return a plain-text error.
 pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_top_k(top_k)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    match top_k {
+        None => Ok(()),
+        Some(k) if k >= -1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null or greater than or equal to -1"),
+    }
 }
 
 /// Validates mutual exclusion of temperature and top_p
@@ -318,32 +375,69 @@ pub fn validate_temperature_top_p_exclusion(
     }
 }
 
-/// Applies [Dynamo's frequency_penalty rule](dynamo_protocols::validation::dynamo::validate_frequency_penalty).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks an optional frequency penalty against the OpenAI scalar range [-2, 2].
+/// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_frequency_penalty(frequency_penalty: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_frequency_penalty(frequency_penalty)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(penalty) = frequency_penalty
+        && !dynamo_protocols::validation::openai::is_valid_frequency_penalty(penalty)
+    {
+        anyhow::bail!(
+            "Frequency penalty must be between {} and {}, got {}",
+            MIN_FREQUENCY_PENALTY,
+            MAX_FREQUENCY_PENALTY,
+            penalty
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's presence_penalty rule](dynamo_protocols::validation::dynamo::validate_presence_penalty).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks an optional presence penalty against the OpenAI scalar range [-2, 2].
+/// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_presence_penalty(presence_penalty: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_presence_penalty(presence_penalty)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(penalty) = presence_penalty
+        && !dynamo_protocols::validation::openai::is_valid_presence_penalty(penalty)
+    {
+        anyhow::bail!(
+            "Presence penalty must be between {} and {}, got {}",
+            MIN_PRESENCE_PENALTY,
+            MAX_PRESENCE_PENALTY,
+            penalty
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's repetition_penalty rule](dynamo_protocols::validation::dynamo::validate_repetition_penalty).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks Dynamo's optional repetition penalty without mutation.
+/// None and typed NaN succeed; values <= 0 or > 2 return a plain-text error.
 pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_repetition_penalty(repetition_penalty)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    // It should be greater than 0.0 and less than equal to 2.0
+    if let Some(penalty) = repetition_penalty
+        && (penalty <= MIN_REPETITION_PENALTY || penalty > MAX_REPETITION_PENALTY)
+    {
+        anyhow::bail!(
+            "Repetition penalty must be between {} and {}, got {}",
+            MIN_REPETITION_PENALTY,
+            MAX_REPETITION_PENALTY,
+            penalty
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's min_p rule](dynamo_protocols::validation::dynamo::validate_min_p).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks an optional min_p against the shared engine scalar range [0, 1].
+/// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_min_p(min_p)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(p) = min_p
+        && !dynamo_protocols::validation::shared::is_valid_min_p(p)
+    {
+        anyhow::bail!(
+            "Min_p must be between {} and {}, got {}",
+            MIN_MIN_P,
+            MAX_MIN_P,
+            p
+        );
+    }
+    Ok(())
 }
 
 /// Validates logit bias map: each key must be a token id (the string form of a
@@ -382,11 +476,15 @@ pub fn validate_logit_bias(
     Ok(())
 }
 
-/// Applies [Dynamo's n rule](dynamo_protocols::validation::dynamo::validate_n).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks Dynamo's optional choice count, preserving its local limit of 128.
+/// None or 1..=128 succeeds; other values return a plain-text error.
 pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_n(n)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(value) = n
+        && !(MIN_N..=MAX_N).contains(&value)
+    {
+        anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
 }
 
 /// Validates total choices (batch_size × n) doesn't exceed maximum
@@ -529,11 +627,19 @@ fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Applies [Dynamo's top_logprobs rule](dynamo_protocols::validation::dynamo::validate_top_logprobs).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks Dynamo's optional chat logprob count without mutation.
+/// None or 0..=20 succeeds; larger values return a plain-text error.
 pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_top_logprobs(top_logprobs)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(value) = top_logprobs
+        && !(0..=20).contains(&value)
+    {
+        anyhow::bail!(
+            "Top_logprobs must be between 0 and {}, got {}",
+            MAX_TOP_LOGPROBS,
+            value
+        );
+    }
+    Ok(())
 }
 
 /// Merges and validates request tools and tools declared in system messages.
@@ -856,11 +962,22 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Applies [Dynamo's logprobs rule](dynamo_protocols::validation::dynamo::validate_logprobs).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks optional completion logprobs with the library's fixed vLLM rule, 0..=20.
+/// None succeeds; larger values retain Dynamo's plain-text error. The u8 input
+/// remains unchanged; conversion to i32 is lossless and does not admit negative JSON values.
+/// This rule does not track vLLM's configurable limit or full-vocabulary sentinel.
 pub fn validate_logprobs(logprobs: Option<u8>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_logprobs(logprobs)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(value) = logprobs
+        && dynamo_protocols::validation::vllm::validate_completion_logprobs(Some(i32::from(value)))
+            .is_err()
+    {
+        anyhow::bail!(
+            "Logprobs must be between 0 and {}, got {}",
+            MAX_LOGPROBS,
+            value
+        );
+    }
+    Ok(())
 }
 
 /// Validates best_of parameter
@@ -898,20 +1015,51 @@ pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Applies [Dynamo's max_tokens rule](dynamo_protocols::validation::dynamo::validate_max_tokens).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+const MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
+/// Checks Dynamo's optional output-token limit without mutation.
+/// None or 1..=1_048_576 succeeds; zero and larger values return distinct plain-text errors.
 pub fn validate_max_tokens(max_tokens: Option<u32>) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_max_tokens(max_tokens)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(tokens) = max_tokens
+        && tokens == 0
+    {
+        anyhow::bail!("Max tokens must be greater than 0, got {}", tokens);
+    }
+    if let Some(tokens) = max_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
+    }
+    Ok(())
 }
 
-/// Applies [Dynamo's max_completion_tokens rule](dynamo_protocols::validation::dynamo::validate_max_completion_tokens).
-/// Preserves the helper's diagnostic as a plain local error, without a typed source chain.
+/// Checks Dynamo's optional chat completion-token limit without mutation.
+/// None or 1..=1_048_576 succeeds; zero and larger values return distinct plain-text errors.
 pub fn validate_max_completion_tokens(
     max_completion_tokens: Option<u32>,
 ) -> Result<(), anyhow::Error> {
-    dynamo_protocols::validation::dynamo::validate_max_completion_tokens(max_completion_tokens)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+    if let Some(tokens) = max_completion_tokens
+        && tokens == 0
+    {
+        anyhow::bail!(
+            "Max completion tokens must be greater than 0, got {}",
+            tokens
+        );
+    }
+    if let Some(tokens) = max_completion_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max completion tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
+    }
+    Ok(())
 }
 
 //
@@ -1207,6 +1355,56 @@ mod scalar_port_tests {
                 ),
             ] {
                 assert_plain_error(result, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn completion_logprobs_preserves_dynamo_range_and_representation() {
+        let base = json!({"model": "test", "prompt": "hi"});
+        let omitted: NvCreateCompletionRequest = serde_json::from_value(base.clone()).unwrap();
+        let mut body = base.clone();
+        for field in [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "min_p",
+            "top_k",
+            "n",
+            "logprobs",
+            "max_tokens",
+        ] {
+            body[field] = Value::Null;
+        }
+        let explicit_null: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+        let before = serde_json::to_value(&explicit_null).unwrap();
+        omitted.validate().unwrap();
+        explicit_null.validate().unwrap();
+        assert_eq!(serde_json::to_value(&explicit_null).unwrap(), before);
+        assert_eq!(serde_json::to_value(&omitted).unwrap(), before);
+
+        for count in [0, 5, 6, 10, 20, 21, 255] {
+            let mut body = base.clone();
+            body["logprobs"] = json!(count);
+            let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+            let before = serde_json::to_value(&request).unwrap();
+            if count <= 20 {
+                request.validate().unwrap();
+            } else {
+                assert_plain_error(
+                    request.validate(),
+                    &format!("Logprobs must be between 0 and 20, got {count}"),
+                );
+            }
+            assert_eq!(serde_json::to_value(&request).unwrap(), before);
+        }
+        for field in ["n", "logprobs"] {
+            for value in [-1, 256] {
+                let mut body = base.clone();
+                body[field] = json!(value);
+                assert!(serde_json::from_value::<NvCreateCompletionRequest>(body).is_err());
             }
         }
     }
