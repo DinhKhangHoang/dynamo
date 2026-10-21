@@ -6,6 +6,7 @@ use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
 };
+use dynamo_protocols::validation;
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
@@ -319,37 +320,38 @@ pub fn validate_response_format_conflicts(
     Ok(())
 }
 
+/// Converts the six delegated scalar failures to Dynamo's plain-text diagnostics.
+/// Preserves the rejected value's Rust Display without retaining a typed source.
+/// Unknown fields retain the library diagnostic text.
+fn scalar_validation_error(error: validation::ValidationError) -> anyhow::Error {
+    let (label, (min, max)) = match error.field {
+        "temperature" => ("Temperature", TEMPERATURE_RANGE),
+        "top_p" => ("Top_p", (MIN_TOP_P, MAX_TOP_P)),
+        "frequency_penalty" => ("Frequency penalty", FREQUENCY_PENALTY_RANGE),
+        "presence_penalty" => ("Presence penalty", PRESENCE_PENALTY_RANGE),
+        "min_p" => ("Min_p", MIN_P_RANGE),
+        // Every u8 bound is exact in f32 and retains its integer display.
+        "logprobs" => (
+            "Logprobs",
+            (f32::from(MIN_LOGPROBS), f32::from(MAX_LOGPROBS)),
+        ),
+        _ => return anyhow::anyhow!(error.to_string()),
+    };
+    let value = error.value;
+    anyhow::anyhow!("{label} must be between {min} and {max}, got {value}")
+}
+
 /// Checks an optional temperature against the OpenAI scalar range [0, 2].
 /// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
-    if let Some(temp) = temperature
-        && !dynamo_protocols::validation::openai::is_valid_temperature(temp)
-    {
-        anyhow::bail!(
-            "Temperature must be between {} and {}, got {}",
-            MIN_TEMPERATURE,
-            MAX_TEMPERATURE,
-            temp
-        );
-    }
-    Ok(())
+    validation::openai::validate_temperature(temperature).map_err(scalar_validation_error)
 }
 
 /// Checks an optional top_p against the shared engine range (0, 1].
 /// None succeeds; zero, non-finite, or out-of-range values return Dynamo's plain-text error.
 /// Dynamo deliberately uses the engine rule rather than OpenAI's inclusive lower bound.
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
-    if let Some(p) = top_p
-        && !dynamo_protocols::validation::shared::is_valid_top_p(p)
-    {
-        anyhow::bail!(
-            "Top_p must be between {} and {}, got {}",
-            MIN_TOP_P,
-            MAX_TOP_P,
-            p
-        );
-    }
-    Ok(())
+    validation::vllm::validate_top_p(top_p).map_err(scalar_validation_error)
 }
 
 /// Checks Dynamo's top_k admission rule without rewriting its disabled sentinels.
@@ -378,33 +380,14 @@ pub fn validate_temperature_top_p_exclusion(
 /// Checks an optional frequency penalty against the OpenAI scalar range [-2, 2].
 /// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_frequency_penalty(frequency_penalty: Option<f32>) -> Result<(), anyhow::Error> {
-    if let Some(penalty) = frequency_penalty
-        && !dynamo_protocols::validation::openai::is_valid_frequency_penalty(penalty)
-    {
-        anyhow::bail!(
-            "Frequency penalty must be between {} and {}, got {}",
-            MIN_FREQUENCY_PENALTY,
-            MAX_FREQUENCY_PENALTY,
-            penalty
-        );
-    }
-    Ok(())
+    validation::openai::validate_frequency_penalty(frequency_penalty)
+        .map_err(scalar_validation_error)
 }
 
 /// Checks an optional presence penalty against the OpenAI scalar range [-2, 2].
 /// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_presence_penalty(presence_penalty: Option<f32>) -> Result<(), anyhow::Error> {
-    if let Some(penalty) = presence_penalty
-        && !dynamo_protocols::validation::openai::is_valid_presence_penalty(penalty)
-    {
-        anyhow::bail!(
-            "Presence penalty must be between {} and {}, got {}",
-            MIN_PRESENCE_PENALTY,
-            MAX_PRESENCE_PENALTY,
-            penalty
-        );
-    }
-    Ok(())
+    validation::openai::validate_presence_penalty(presence_penalty).map_err(scalar_validation_error)
 }
 
 /// Checks Dynamo's optional repetition penalty without mutation.
@@ -427,17 +410,7 @@ pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<()
 /// Checks an optional min_p against the shared engine scalar range [0, 1].
 /// None succeeds; non-finite or out-of-range values return Dynamo's plain-text error.
 pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
-    if let Some(p) = min_p
-        && !dynamo_protocols::validation::shared::is_valid_min_p(p)
-    {
-        anyhow::bail!(
-            "Min_p must be between {} and {}, got {}",
-            MIN_MIN_P,
-            MAX_MIN_P,
-            p
-        );
-    }
-    Ok(())
+    validation::vllm::validate_min_p(min_p).map_err(scalar_validation_error)
 }
 
 /// Validates logit bias map: each key must be a token id (the string form of a
@@ -967,17 +940,8 @@ pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow:
 /// remains unchanged; conversion to i32 is lossless and does not admit negative JSON values.
 /// This rule does not track vLLM's configurable limit or full-vocabulary sentinel.
 pub fn validate_logprobs(logprobs: Option<u8>) -> Result<(), anyhow::Error> {
-    if let Some(value) = logprobs
-        && dynamo_protocols::validation::vllm::validate_completion_logprobs(Some(i32::from(value)))
-            .is_err()
-    {
-        anyhow::bail!(
-            "Logprobs must be between 0 and {}, got {}",
-            MAX_LOGPROBS,
-            value
-        );
-    }
-    Ok(())
+    validation::vllm::validate_completion_logprobs(logprobs.map(i32::from))
+        .map_err(scalar_validation_error)
 }
 
 /// Validates best_of parameter
@@ -1283,6 +1247,22 @@ mod scalar_port_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scalar_diagnostics_preserve_numeric_display() {
+        assert_plain_error(
+            validate_top_p(Some(-0.0)),
+            "Top_p must be between 0 and 1, got -0",
+        );
+        assert_plain_error(
+            validate_temperature(Some(2.125)),
+            "Temperature must be between 0 and 2, got 2.125",
+        );
+        assert_plain_error(
+            validate_frequency_penalty(Some(-2.125)),
+            "Frequency penalty must be between -2 and 2, got -2.125",
+        );
     }
 
     #[test]
