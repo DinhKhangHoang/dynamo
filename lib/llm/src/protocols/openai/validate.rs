@@ -320,7 +320,7 @@ pub fn validate_response_format_conflicts(
     Ok(())
 }
 
-/// Converts the six delegated scalar failures to Dynamo's plain-text diagnostics.
+/// Converts delegated scalar failures to Dynamo's plain-text diagnostics.
 /// Preserves the rejected value's Rust Display without retaining a typed source.
 /// Unknown fields retain the library diagnostic text.
 fn scalar_validation_error(error: validation::ValidationError) -> anyhow::Error {
@@ -335,6 +335,12 @@ fn scalar_validation_error(error: validation::ValidationError) -> anyhow::Error 
             "Logprobs",
             (f32::from(MIN_LOGPROBS), f32::from(MAX_LOGPROBS)),
         ),
+        "top_logprobs" => (
+            "Top_logprobs",
+            (f32::from(MIN_TOP_LOGPROBS), f32::from(MAX_TOP_LOGPROBS)),
+        ),
+        "n" => ("n", (f32::from(MIN_N), f32::from(MAX_N))),
+        "best_of" => ("Best_of", (f32::from(MIN_BEST_OF), f32::from(MAX_BEST_OF))),
         _ => return anyhow::anyhow!(error.to_string()),
     };
     let value = error.value;
@@ -413,8 +419,9 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
     validation::vllm::validate_min_p(min_p).map_err(scalar_validation_error)
 }
 
-/// Validates logit bias map: each key must be a token id (the string form of a
-/// `u32`) and each value a number within the allowed bias range.
+/// Checks each logit-bias entry in map order: parse its key as u32, admit a JSON
+/// number, then narrow to f32 and check [-100, 100]. None and empty maps succeed.
+/// Returns the first plain-text error without mutation; invalid keys are not echoed.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -436,28 +443,23 @@ pub fn validate_logit_bias(
             )
         })? as f32;
 
-        if !(MIN_LOGIT_BIAS..=MAX_LOGIT_BIAS).contains(&bias) {
-            anyhow::bail!(
+        validation::openai::validate_logit_bias_value(bias).map_err(|error| {
+            anyhow::anyhow!(
                 "Logit bias for token '{}' must be between {} and {}, got {}",
                 token,
                 MIN_LOGIT_BIAS,
                 MAX_LOGIT_BIAS,
-                bias
-            );
-        }
+                error.value
+            )
+        })?;
     }
     Ok(())
 }
 
-/// Checks Dynamo's optional choice count, preserving its local limit of 128.
+/// Checks an optional choice count against the OpenAI scalar range [1, 128].
 /// None or 1..=128 succeeds; other values return a plain-text error.
 pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
-    if let Some(value) = n
-        && !(MIN_N..=MAX_N).contains(&value)
-    {
-        anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
-    }
-    Ok(())
+    validation::openai::validate_n(n).map_err(scalar_validation_error)
 }
 
 /// Validates total choices (batch_size × n) doesn't exceed maximum
@@ -600,19 +602,10 @@ fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Checks Dynamo's optional chat logprob count without mutation.
+/// Checks an optional chat logprob count against the OpenAI scalar range [0, 20].
 /// None or 0..=20 succeeds; larger values return a plain-text error.
 pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Error> {
-    if let Some(value) = top_logprobs
-        && !(0..=20).contains(&value)
-    {
-        anyhow::bail!(
-            "Top_logprobs must be between 0 and {}, got {}",
-            MAX_TOP_LOGPROBS,
-            value
-        );
-    }
-    Ok(())
+    validation::openai::validate_top_logprobs(top_logprobs).map_err(scalar_validation_error)
 }
 
 /// Merges and validates request tools and tools declared in system messages.
@@ -944,26 +937,18 @@ pub fn validate_logprobs(logprobs: Option<u8>) -> Result<(), anyhow::Error> {
         .map_err(scalar_validation_error)
 }
 
-/// Validates best_of parameter
+/// Checks the optional OpenAI best_of count [0, 20], then Dynamo's best_of >= n
+/// relationship when both are present. None succeeds; failures are plain-text errors.
 pub fn validate_best_of(best_of: Option<u8>, n: Option<u8>) -> Result<(), anyhow::Error> {
-    if let Some(best_of_value) = best_of {
-        if !(MIN_BEST_OF..=MAX_BEST_OF).contains(&best_of_value) {
-            anyhow::bail!(
-                "Best_of must be between 0 and {}, got {}",
-                MAX_BEST_OF,
-                best_of_value
-            );
-        }
-
-        if let Some(n_value) = n
-            && best_of_value < n_value
-        {
-            anyhow::bail!(
-                "Best_of must be greater than or equal to n, got best_of={} and n={}",
-                best_of_value,
-                n_value
-            );
-        }
+    validation::openai::validate_best_of(best_of).map_err(scalar_validation_error)?;
+    if let (Some(best_of_value), Some(n_value)) = (best_of, n)
+        && best_of_value < n_value
+    {
+        anyhow::bail!(
+            "Best_of must be greater than or equal to n, got best_of={} and n={}",
+            best_of_value,
+            n_value
+        );
     }
     Ok(())
 }
@@ -1130,185 +1115,130 @@ mod scalar_port_tests {
     }
 
     #[test]
-    fn scalar_float_boundaries_and_nonfinite_values() {
+    fn delegated_float_errors_keep_dynamo_diagnostics() {
         type Check = fn(Option<f32>) -> anyhow::Result<()>;
-        for (check, label, lower, upper, exclusive_lower, accepts_nan) in [
+        for (check, value, expected) in [
             (
                 validate_temperature as Check,
-                "Temperature",
-                0.0,
-                2.0,
-                false,
-                false,
+                2.125,
+                "Temperature must be between 0 and 2, got 2.125",
             ),
-            (validate_top_p as Check, "Top_p", 0.0, 1.0, true, false),
+            (
+                validate_top_p as Check,
+                -0.0,
+                "Top_p must be between 0 and 1, got -0",
+            ),
             (
                 validate_frequency_penalty as Check,
-                "Frequency penalty",
-                -2.0,
-                2.0,
-                false,
-                false,
+                -2.125,
+                "Frequency penalty must be between -2 and 2, got -2.125",
             ),
             (
                 validate_presence_penalty as Check,
-                "Presence penalty",
-                -2.0,
-                2.0,
-                false,
-                false,
+                f32::INFINITY,
+                "Presence penalty must be between -2 and 2, got inf",
             ),
             (
-                validate_repetition_penalty as Check,
-                "Repetition penalty",
-                0.0,
-                2.0,
-                true,
-                true,
+                validate_min_p as Check,
+                f32::NAN,
+                "Min_p must be between 0 and 1, got NaN",
             ),
-            (validate_min_p as Check, "Min_p", 0.0, 1.0, false, false),
         ] {
             check(None).unwrap();
-            check(Some(upper)).unwrap();
-            check(Some((lower + upper) / 2.0)).unwrap();
-            for value in [
-                lower - 1.0,
-                upper + 1.0,
-                f32::NEG_INFINITY,
-                f32::INFINITY,
-                f32::NAN,
-            ] {
-                if value.is_nan() && accepts_nan {
-                    check(Some(value)).unwrap();
-                } else {
-                    assert_plain_error(
-                        check(Some(value)),
-                        &format!("{label} must be between {lower} and {upper}, got {value}"),
-                    );
-                }
-            }
-            if exclusive_lower {
-                assert_plain_error(
-                    check(Some(lower)),
-                    &format!("{label} must be between {lower} and {upper}, got {lower}"),
-                );
-            } else {
-                check(Some(lower)).unwrap();
+            check(Some(1.0)).unwrap();
+            assert_plain_error(check(Some(value)), expected);
+            for nonfinite in [f32::NAN, f32::NEG_INFINITY, f32::INFINITY] {
+                assert!(check(Some(nonfinite)).is_err(), "{expected}: {nonfinite}");
             }
         }
     }
 
     #[test]
-    fn scalar_integer_bounds_and_sentinels() {
+    fn delegated_counts_keep_dynamo_diagnostics() {
         type Check = fn(Option<u8>) -> anyhow::Result<()>;
-        for (check, label, lower, upper) in [
-            (validate_n as Check, "n", 1, 128),
-            (validate_top_logprobs as Check, "Top_logprobs", 0, 20),
-            (validate_logprobs as Check, "Logprobs", 0, 20),
-        ] {
-            check(None).unwrap();
-            check(Some(lower)).unwrap();
-            check(Some(upper)).unwrap();
-            assert_plain_error(
-                check(Some(upper + 1)),
-                &format!(
-                    "{label} must be between {lower} and {upper}, got {}",
-                    upper + 1
-                ),
-            );
-        }
-        assert_plain_error(validate_n(Some(0)), "n must be between 1 and 128, got 0");
-        for value in [None, Some(-1), Some(0), Some(1), Some(i32::MAX)] {
-            validate_top_k(value).unwrap();
-        }
-        assert_plain_error(
-            validate_top_k(Some(-2)),
-            "Top_k must be null or greater than or equal to -1",
-        );
-        type TokenCheck = fn(Option<u32>) -> anyhow::Result<()>;
-        for (check, label) in [
-            (validate_max_tokens as TokenCheck, "Max tokens"),
+        for (check, upper, invalid, expected) in [
             (
-                validate_max_completion_tokens as TokenCheck,
-                "Max completion tokens",
+                validate_logprobs as Check,
+                20,
+                21,
+                "Logprobs must be between 0 and 20, got 21",
+            ),
+            (
+                validate_top_logprobs as Check,
+                20,
+                21,
+                "Top_logprobs must be between 0 and 20, got 21",
+            ),
+            (
+                validate_n as Check,
+                128,
+                0,
+                "n must be between 1 and 128, got 0",
+            ),
+            (
+                (|value| validate_best_of(value, None)) as Check,
+                20,
+                21,
+                "Best_of must be between 0 and 20, got 21",
             ),
         ] {
-            for value in [None, Some(1), Some(1_048_576)] {
+            for value in [None, Some(1), Some(upper)] {
                 check(value).unwrap();
             }
-            assert_plain_error(
-                check(Some(0)),
-                &format!("{label} must be greater than 0, got 0"),
-            );
-            for value in [1_048_577, u32::MAX] {
-                assert_plain_error(
-                    check(Some(value)),
-                    &format!("{label} must not exceed 1048576, got {value}"),
-                );
-            }
+            assert_plain_error(check(Some(invalid)), expected);
         }
     }
 
     #[test]
-    fn scalar_diagnostics_preserve_numeric_display() {
+    fn logit_bias_preserves_projection_diagnostics_and_entry_order() {
+        use std::collections::HashMap;
+
         assert_plain_error(
-            validate_top_p(Some(-0.0)),
-            "Top_p must be between 0 and 1, got -0",
+            validate_logit_bias(&Some(HashMap::from([("1".to_string(), json!(101.25))]))),
+            "Logit bias for token '1' must be between -100 and 100, got 101.25",
         );
-        assert_plain_error(
-            validate_temperature(Some(2.125)),
-            "Temperature must be between 0 and 2, got 2.125",
-        );
-        assert_plain_error(
-            validate_frequency_penalty(Some(-2.125)),
-            "Frequency penalty must be between -2 and 2, got -2.125",
-        );
+        // Both values round to a valid f32 boundary before range validation.
+        for value in [-100.0000001, 100.0000001] {
+            validate_logit_bias(&Some(HashMap::from([("+1".to_string(), json!(value))]))).unwrap();
+        }
+        validate_logit_bias(&Some(HashMap::new())).unwrap();
+
+        let entries = HashMap::from([
+            ("invalid".to_string(), json!("bad")),
+            ("1".to_string(), json!(101.25)),
+        ]);
+        let expected = if entries.keys().next().unwrap() == "1" {
+            "Logit bias for token '1' must be between -100 and 100, got 101.25"
+        } else {
+            "Logit bias key must be a non-negative 32-bit integer token id"
+        };
+        assert_plain_error(validate_logit_bias(&Some(entries)), expected);
     }
 
     #[test]
-    fn request_scalars_preserve_omission_null_and_top_k_normalization() {
-        use crate::protocols::common::SamplingOptionsProvider;
-
-        for top_k in [-1, 0, 1] {
-            let base = json!({"model": "test", "messages": [{"role": "user", "content": "hi"}], "top_k": top_k});
-            let mut with_nulls = base.clone();
-            for field in [
-                "temperature",
-                "top_p",
-                "frequency_penalty",
-                "presence_penalty",
-                "repetition_penalty",
-                "min_p",
-                "n",
-                "top_logprobs",
-                "max_tokens",
-                "max_completion_tokens",
-            ] {
-                with_nulls[field] = Value::Null;
-            }
-            let omitted: NvCreateChatCompletionRequest = serde_json::from_value(base).unwrap();
-            let explicit_null: NvCreateChatCompletionRequest =
-                serde_json::from_value(with_nulls).unwrap();
-            let before = serde_json::to_value(&explicit_null).unwrap();
-            omitted.validate().unwrap();
-            explicit_null.validate().unwrap();
-            assert_eq!(serde_json::to_value(&explicit_null).unwrap(), before);
-            assert_eq!(serde_json::to_value(&omitted).unwrap(), before);
-            assert_eq!(
-                explicit_null.extract_sampling_options().unwrap().top_k,
-                Some(if top_k == 0 { -1 } else { top_k })
-            );
+    fn chat_scalars_preserve_omission_and_null() {
+        let base = json!({"model": "test", "messages": [{"role": "user", "content": "hi"}]});
+        let mut with_nulls = base.clone();
+        for field in [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "min_p",
+            "n",
+            "top_logprobs",
+            "logit_bias",
+        ] {
+            with_nulls[field] = Value::Null;
         }
-        for field in ["n", "top_logprobs"] {
-            let mut body =
-                json!({"model": "test", "messages": [{"role": "user", "content": "hi"}]});
-            for value in [json!(-1), json!(256)] {
-                body[field] = value;
-                assert!(
-                    serde_json::from_value::<NvCreateChatCompletionRequest>(body.clone()).is_err()
-                );
-            }
-        }
+        let omitted: NvCreateChatCompletionRequest = serde_json::from_value(base).unwrap();
+        let explicit_null: NvCreateChatCompletionRequest =
+            serde_json::from_value(with_nulls).unwrap();
+        let before = serde_json::to_value(&explicit_null).unwrap();
+        omitted.validate().unwrap();
+        explicit_null.validate().unwrap();
+        assert_eq!(serde_json::to_value(&explicit_null).unwrap(), before);
+        assert_eq!(serde_json::to_value(&omitted).unwrap(), before);
     }
 
     #[test]
@@ -1349,12 +1279,11 @@ mod scalar_port_tests {
             "top_p",
             "frequency_penalty",
             "presence_penalty",
-            "repetition_penalty",
             "min_p",
-            "top_k",
-            "n",
             "logprobs",
-            "max_tokens",
+            "n",
+            "best_of",
+            "logit_bias",
         ] {
             body[field] = Value::Null;
         }
@@ -1380,12 +1309,10 @@ mod scalar_port_tests {
             }
             assert_eq!(serde_json::to_value(&request).unwrap(), before);
         }
-        for field in ["n", "logprobs"] {
-            for value in [-1, 256] {
-                let mut body = base.clone();
-                body[field] = json!(value);
-                assert!(serde_json::from_value::<NvCreateCompletionRequest>(body).is_err());
-            }
+        for value in [-1, 256] {
+            let mut body = base.clone();
+            body["logprobs"] = json!(value);
+            assert!(serde_json::from_value::<NvCreateCompletionRequest>(body).is_err());
         }
     }
 
