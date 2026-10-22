@@ -61,13 +61,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
-	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 const (
 	DefaultClusterName        = "default"
 	DefaultServiceAccountName = "default"
-	// Marks pre-native-scaling LWS/PodGroup objects: <dcd-name>-0, -1, ...
+	// Marks pre-native-scaling LWS objects: <dcd-name>-0, -1, ...
 	// Native-scaling LWS objects must not carry it.
 	legacyLWSInstanceIDLabel = "instance-id"
 )
@@ -99,7 +98,6 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=get;list;watch;create;update;patch;delete
 
-// +kubebuilder:rbac:groups=scheduling.volcano.sh,resources=podgroups,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=leaderworkerset.x-k8s.io,resources=leaderworkersets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -441,7 +439,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		anyModified = true
 	}
 
-	// Prune old per-replica LWS/PodGroups. The legacy path stamped
+	// Prune old per-replica LWS objects. The legacy path stamped
 	// instance-id; native scaling does not.
 	hasInstanceID, err := labels.NewRequirement(legacyLWSInstanceIDLabel, selection.Exists, nil)
 	if err != nil {
@@ -468,22 +466,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
 		if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
 			return ComponentReconcileResult{}, fmt.Errorf("delete legacy LeaderWorkerSet %q: %w", legacy.Name, err)
-		}
-		anyModified = true
-	}
-
-	var legacyPGList volcanov1beta1.PodGroupList
-	if err := r.List(ctx, &legacyPGList, legacyListOpts...); err != nil {
-		return ComponentReconcileResult{}, fmt.Errorf("list legacy PodGroups for cleanup: %w", err)
-	}
-	for i := range legacyPGList.Items {
-		legacy := &legacyPGList.Items[i]
-		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
-			continue
-		}
-		logger.Info("Deleting legacy PodGroup", "name", legacy.Name)
-		if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
-			return ComponentReconcileResult{}, fmt.Errorf("delete legacy PodGroup %q: %w", legacy.Name, err)
 		}
 		anyModified = true
 	}
@@ -1089,14 +1071,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-			Owns(&volcanov1beta1.PodGroup{}, builder.WithPredicates(predicate.Funcs{
-				// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
-				CreateFunc:  func(ce event.CreateEvent) bool { return false },
-				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-				GenericFunc: func(ge event.GenericEvent) bool { return true },
-			}))
+		}))
 	}
 
 	if r.Config.Ingress.UseVirtualService() {

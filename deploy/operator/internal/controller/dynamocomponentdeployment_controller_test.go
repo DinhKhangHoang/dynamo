@@ -59,7 +59,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
-	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 func noContainerGPUs() dynamo.ContainerGPUCount {
@@ -2402,8 +2401,6 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			err = leaderworkersetv1.AddToScheme(s)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			err = volcanov1beta1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Create DynamoComponentDeployment
 			dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
@@ -2505,7 +2502,6 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 	require.NoError(t, v1beta1.AddToScheme(s))
 	require.NoError(t, corev1.AddToScheme(s))
 	require.NoError(t, leaderworkersetv1.AddToScheme(s))
-	require.NoError(t, volcanov1beta1.AddToScheme(s))
 
 	replicas := int32(3)
 	makeDCD := func() *v1beta1.DynamoComponentDeployment {
@@ -2581,12 +2577,12 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 	}
 
 	dcd := makeDCD()
-	objects := make([]client.Object, 0, 2+2*int(replicas))
+	objects := make([]client.Object, 0, 2+int(replicas))
 	objects = append(objects, dcd, serviceAccount.DeepCopy())
 	// v1.1.0 represented DCD replicas as separate one-replica LWS objects.
 	// Native LWS scaling should adopt the old "-0" object, set its
 	// Spec.Replicas to the DCD replica count, and delete the excess indexed
-	// objects and their legacy PodGroups.
+	// LWS objects.
 	for i := range int(replicas) {
 		instanceID := fmt.Sprintf("%d", i)
 		name := fmt.Sprintf("%s-%d", dcd.Name, i)
@@ -2602,16 +2598,6 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 				},
 				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
 					Replicas: ptr.To(int32(1)),
-				},
-			},
-			&volcanov1beta1.PodGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      name,
-					Namespace: "default",
-					Labels: map[string]string{
-						legacyLWSInstanceIDLabel: instanceID,
-					},
-					OwnerReferences: []metav1.OwnerReference{makeOwnerRef(dcd)},
 				},
 			},
 		)
@@ -2630,10 +2616,6 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 	for _, name := range []string{"test-component-1", "test-component-2"} {
 		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
 		require.True(t, k8serrors.IsNotFound(err), "expected legacy LeaderWorkerSet %q to be deleted, got %v", name, err)
-	}
-	for _, name := range []string{"test-component-0", "test-component-1", "test-component-2"} {
-		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &volcanov1beta1.PodGroup{})
-		require.True(t, k8serrors.IsNotFound(err), "expected legacy PodGroup %q to be deleted, got %v", name, err)
 	}
 }
 

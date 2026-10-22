@@ -161,7 +161,7 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 
 **Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment is multinode and requires a gang scheduler. Install an orchestrator first — the operator returns a hard error otherwise:
 
-- [Multinode Orchestration](../installation/multinode-orchestration.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
+- [Multinode Orchestration](../installation/multinode-orchestration.md) - install-time prerequisites (Grove + KAI, or LWS with separately configured scheduling).
 
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#support-matrix).
 

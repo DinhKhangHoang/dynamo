@@ -4,7 +4,7 @@
 title: Multinode Orchestration
 ---
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes.
+Multinode deployments require either Grove + KAI Scheduler or LeaderWorkerSet (LWS). When using LWS, configure scheduling separately for workloads that span multiple nodes.
 
 ## Option 1: Grove + KAI Scheduler
 
@@ -53,11 +53,17 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 </Tabs>
 
 
-## Option 2: LeaderWorkerSet + Volcano
+## Option 2: LeaderWorkerSet
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
+Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove. Choose either Volcano or native Kubernetes gang scheduling for LWS. Volcano integration remains supported; it is not a prerequisite when using the native option.
 
-1. Install Volcano:
+Dynamo auto-detects LWS from the `leaderworkerset.x-k8s.io` API group. It does not infer LWS's configured scheduler provider from installed APIs or enable gang scheduling automatically. Configure and verify your chosen integration before deploying multinode workloads. Set `orchestrators.lws.enabled: false` in the operator configuration to disable LWS explicitly.
+
+The standard DynamoComponentDeployment (DCD) pathway supports LWS `v0.7.0` or newer. When enabling DisaggregatedSet (DS), use an LWS release that serves `disaggregatedset.x-k8s.io/v1`; the current Dynamo operator dependency is LWS `v0.10.0`. Native gang scheduling has additional upstream version requirements described below.
+
+### Volcano
+
+Install [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide):
 
 ```bash
 helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
@@ -65,7 +71,7 @@ helm repo update
 helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
 ```
 
-2. Install LWS with Volcano gang scheduling enabled. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer:
+Install LWS with the Volcano scheduler provider:
 
 ```bash
 export LWS_VERSION=0.10.0
@@ -77,7 +83,21 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
   --wait --timeout 300s
 ```
 
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options.
+Keep Volcano installed while LWS uses this provider. LWS manages the scheduling PodGroups for this integration.
+
+### Native Kubernetes Gang Scheduling
+
+**Experimental.** The upstream LWS native integration is alpha. It requires LWS `v0.11.0` or newer and Kubernetes `1.37` with the `scheduling.k8s.io/v1beta1` `Workload` and `PodGroup` APIs. Volcano is not required.
+
+Follow [Enable native gang scheduling](https://lws.sigs.k8s.io/docs/installation/#enable-native-gang-scheduling) to configure the Kubernetes feature gates and scheduling APIs. For the LWS installation, select a compatible release and add these Helm values:
+
+```bash
+--set featureGates.WorkloadAwareScheduling=true \
+--set gangSchedulingManagement.schedulerProvider=kubernetes
+```
+
+Complete the upstream prerequisite verification and workload opt-in through `spec.scheduling`. Installing LWS or selecting the scheduler provider alone does not enable native gang scheduling for a workload; Dynamo does not set `spec.scheduling` automatically.
+
 ## Role-Specific Pod Templates
 
 **Available since Dynamo 1.6.0.** By default, a multinode component uses one component-level

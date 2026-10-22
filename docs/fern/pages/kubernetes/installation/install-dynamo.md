@@ -201,7 +201,7 @@ The Dynamo install command above includes commented flags for each optional comp
 
 ### Multinode:
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
+Multinode deployments require either Grove + KAI Scheduler or LeaderWorkerSet (LWS). When using LWS, configure scheduling separately for workloads that span multiple nodes. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
 
 DisaggregatedSet is an opt-in multinode pathway below Grove. To request it for a new DGD, install an LWS release that serves `disaggregatedset.x-k8s.io/v1` and set `nvidia.com/enable-disaggregatedset: "true"`. When Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`. Dynamo persists the selected provider in `nvidia.com/workload-provider`; installing the DS API or changing the enable annotations does not change existing deployments. If the selected provider becomes unavailable, Dynamo reports `Ready=False` instead of silently switching providers. Delete and recreate the DGD to choose a different pathway.
 
@@ -230,31 +230,14 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
 > `ClusterTopologyBinding` API. Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
-#### LWS + Volcano
+#### LeaderWorkerSet
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) (>= v0.7.0) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Both must be installed before deploying multinode workloads.
+Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove for multinode deployments. Choose one of these gang scheduling integrations:
 
-1. Install Volcano:
+- [Volcano](multinode-orchestration.md#volcano): install Volcano and configure LWS to use its scheduler provider. This integration remains supported.
+- [Native Kubernetes Gang Scheduling](multinode-orchestration.md#native-kubernetes-gang-scheduling): configure compatible Kubernetes and LWS versions with the upstream feature gates and scheduling APIs. Volcano is not required.
 
-```bash
-helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
-helm repo update
-helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
-```
-
-2. Install LWS with Volcano gang scheduling enabled. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer:
-
-```bash
-export LWS_VERSION=0.10.0
-helm install lws oci://registry.k8s.io/lws/charts/lws \
-  --version=$LWS_VERSION \
-  --namespace lws-system \
-  --create-namespace \
-  --set gangSchedulingManagement.schedulerProvider=volcano \
-  --wait --timeout 300s
-```
-
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options. See [Multinode Orchestration](multinode-orchestration.md) to compare the supported orchestrators.
+Dynamo detects LWS independently of the scheduler provider. See [Multinode Orchestration](multinode-orchestration.md#option-2-leaderworkerset) for installation and configuration.
 
 ### Network Operator / RDMA
 
