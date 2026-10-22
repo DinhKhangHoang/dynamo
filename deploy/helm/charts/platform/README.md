@@ -53,7 +53,9 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 ##### LWS no longer requires Volcano
 
 **Change:** LWS auto-detection depends only on the `leaderworkerset.x-k8s.io` API
-group. Dynamo no longer requires Volcano for LWS orchestration. The operator no longer watches or cleans up legacy Volcano PodGroups.
+group. Dynamo no longer requires Volcano for LWS orchestration. The operator no
+longer watches legacy Volcano PodGroups or performs the old per-replica LWS and
+PodGroup migration cleanup.
 
 **Affected:** Clusters with LWS installed, without Volcano, and without an explicit
 LWS override now enable LWS automatically. Explicitly enabling LWS no longer fails
@@ -67,8 +69,8 @@ in the operator configuration before upgrading.
 
 **Existing deployments:** Follow adjacent minor-version upgrades and complete
 reconciliation at each step. The v1.2.0 operator performs the migration and cleanup
-for PodGroups created by v1.1.x and earlier. Keep Volcano installed when LWS uses
-it. The explicit Volcano scheduler integration for Grove still requires Volcano.
+for per-replica LWS objects and PodGroups created by v1.1.x and earlier. Keep
+Volcano installed when LWS uses it. The explicit Volcano scheduler integration for Grove still requires Volcano.
 
 #### Operator behavior breaking changes
 

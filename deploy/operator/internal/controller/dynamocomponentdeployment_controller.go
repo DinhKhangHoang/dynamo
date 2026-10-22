@@ -46,8 +46,6 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
@@ -66,9 +64,6 @@ import (
 const (
 	DefaultClusterName        = "default"
 	DefaultServiceAccountName = "default"
-	// Marks pre-native-scaling LWS objects: <dcd-name>-0, -1, ...
-	// Native-scaling LWS objects must not carry it.
-	legacyLWSInstanceIDLabel = "instance-id"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -412,9 +407,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
-	logger := log.FromContext(ctx)
-	anyModified := false
-
 	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
@@ -422,52 +414,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	})
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
-	}
-
-	if leaderWorkerSetModified {
-		anyModified = true
-	}
-
-	// The native LWS adopts the old <dcd-name>-0 object. Drop stale legacy
-	// metadata so the cleanup below does not classify it as excess.
-	if _, ok := lwsObj.Labels[legacyLWSInstanceIDLabel]; ok {
-		original := lwsObj.DeepCopy()
-		delete(lwsObj.Labels, legacyLWSInstanceIDLabel)
-		if err := r.Patch(ctx, lwsObj, client.MergeFrom(original)); err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("remove legacy instance-id label from LeaderWorkerSet %q: %w", lwsObj.Name, err)
-		}
-		anyModified = true
-	}
-
-	// Prune old per-replica LWS objects. The legacy path stamped
-	// instance-id; native scaling does not.
-	hasInstanceID, err := labels.NewRequirement(legacyLWSInstanceIDLabel, selection.Exists, nil)
-	if err != nil {
-		return ComponentReconcileResult{}, fmt.Errorf("build legacy label selector: %w", err)
-	}
-	legacyListOpts := []client.ListOption{
-		client.InNamespace(dynamoComponentDeployment.Namespace),
-		client.MatchingLabelsSelector{Selector: labels.NewSelector().Add(*hasInstanceID)},
-	}
-
-	var legacyLWSList leaderworkersetv1.LeaderWorkerSetList
-	if err := r.List(ctx, &legacyLWSList, legacyListOpts...); err != nil {
-		return ComponentReconcileResult{}, fmt.Errorf("list legacy LeaderWorkerSets for cleanup: %w", err)
-	}
-	for i := range legacyLWSList.Items {
-		legacy := &legacyLWSList.Items[i]
-		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
-			continue
-		}
-		// Keep the adopted <dcd-name>-0 LWS even if stale labels remain.
-		if legacy.Name == lwsObj.Name {
-			continue
-		}
-		logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
-		if err := r.Delete(ctx, legacy); err != nil && !k8serrors.IsNotFound(err) {
-			return ComponentReconcileResult{}, fmt.Errorf("delete legacy LeaderWorkerSet %q: %w", legacy.Name, err)
-		}
-		anyModified = true
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
@@ -493,7 +439,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	gpuShapeStatus := &gpuShape
 	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
-			modified:             anyModified,
+			modified:             leaderWorkerSetModified,
 			status:               metav1.ConditionTrue,
 			reason:               "LeaderWorkerSetReady",
 			message:              "LeaderWorkerSet is ready",
@@ -503,7 +449,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	return ComponentReconcileResult{
-		modified:             anyModified,
+		modified:             leaderWorkerSetModified,
 		status:               metav1.ConditionFalse,
 		reason:               "LeaderWorkerSetNotReady",
 		message:              "LeaderWorkerSet is not ready",
@@ -698,8 +644,8 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	return leaderWorkerSet, false, nil
 }
 
-// leaderWorkerSetName keeps the native LWS at <dcd-name>-0 so it can adopt
-// legacy replicas and avoid colliding with the operator ClusterIP service.
+// leaderWorkerSetName preserves the existing <dcd-name>-0 resource name and
+// avoids colliding with the operator ClusterIP service.
 func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
 	return fmt.Sprintf("%s-0", dcd.Name)
 }
