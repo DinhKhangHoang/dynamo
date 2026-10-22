@@ -1573,6 +1573,7 @@ impl ResponseState {
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1704,13 +1705,26 @@ impl ResponseState {
                 })?,
             );
         }
+        if !sampling_mask.is_empty() {
+            mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["sampling_mask"] = serde_json::json!(
+                sampling_mask
+                    .into_iter()
+                    .map(|row| row.ids)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
-        if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+        if let Some(prompt) = self.prompt_info.take() {
+            output
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}))["prompt_logprobs"] =
+                prompt_logprobs_to_json(prompt);
         }
     }
 
@@ -1739,10 +1753,17 @@ impl ResponseState {
             return Ok(());
         }
         let count = prompt.num_prompt_tokens as usize;
+        // A single input token has no preceding context to score. vLLM may
+        // omit all three score arrays instead of sending an unscored row.
+        let score_count = if count == 1 && prompt.logprobs.is_empty() {
+            0
+        } else {
+            count
+        };
         if prompt.token_ids.len() != count
-            || prompt.logprobs.len() != count
-            || prompt.ranks.len() != count
-            || prompt.candidate_tokens.len() != count
+            || prompt.logprobs.len() != score_count
+            || prompt.ranks.len() != score_count
+            || prompt.candidate_tokens.len() != score_count
         {
             return Err(client::protocol_error(format!(
                 "prompt logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
@@ -1761,17 +1782,16 @@ impl ResponseState {
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
     let count = prompt.num_prompt_tokens as usize;
     let mut positions = Vec::with_capacity(count);
+    if count > 0 {
+        positions.push(serde_json::Value::Null);
+    }
     let rows = prompt
         .token_ids
         .into_iter()
         .zip(prompt.logprobs)
         .zip(prompt.ranks)
         .zip(prompt.candidate_tokens);
-    for (index, (((token_id, logprob), rank), candidates)) in rows.enumerate() {
-        if index == 0 {
-            positions.push(serde_json::Value::Null);
-            continue;
-        }
+    for (((token_id, logprob), rank), candidates) in rows.skip(1) {
         let mut entries = serde_json::Map::with_capacity(candidates.tokens.len() + 1);
         entries.insert(token_id.to_string(), prompt_logprob_entry(logprob, rank));
         for candidate in candidates.tokens {
@@ -1783,12 +1803,7 @@ fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
         positions.push(serde_json::Value::Object(entries));
     }
 
-    let mut engine_data = serde_json::Map::with_capacity(1);
-    engine_data.insert(
-        "prompt_logprobs".to_string(),
-        serde_json::Value::Array(positions),
-    );
-    serde_json::Value::Object(engine_data)
+    serde_json::Value::Array(positions)
 }
 
 fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {
