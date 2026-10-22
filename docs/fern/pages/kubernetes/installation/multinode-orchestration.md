@@ -55,11 +55,11 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
 ## Option 2: LeaderWorkerSet
 
-Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove. Choose either Volcano or native Kubernetes gang scheduling for LWS. Volcano integration remains supported; it is not a prerequisite when using the native option.
+Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove. Volcano integration remains supported. Configure the scheduling integration separately from Dynamo's LWS availability detection.
 
 Dynamo auto-detects LWS from the `leaderworkerset.x-k8s.io` API group. It does not infer LWS's configured scheduler provider from installed APIs or enable gang scheduling automatically. Configure and verify your chosen integration before deploying multinode workloads. Set `orchestrators.lws.enabled: false` in the operator configuration to disable LWS explicitly.
 
-The standard DynamoComponentDeployment (DCD) pathway supports LWS `v0.7.0` or newer. When enabling DisaggregatedSet (DS), use an LWS release that serves `disaggregatedset.x-k8s.io/v1`; the current Dynamo operator dependency is LWS `v0.10.0`. Native gang scheduling has additional upstream version requirements described below.
+The standard DynamoComponentDeployment (DCD) pathway supports LWS `v0.7.0` or newer. When enabling DisaggregatedSet (DS), use an LWS release that serves `disaggregatedset.x-k8s.io/v1`; the current Dynamo operator dependency is LWS `v0.10.0`.
 
 ### Volcano
 
@@ -84,19 +84,6 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
 ```
 
 Keep Volcano installed while LWS uses this provider. LWS manages the scheduling PodGroups for this integration.
-
-### Native Kubernetes Gang Scheduling
-
-**Experimental.** The upstream LWS native integration is alpha. It requires LWS `v0.11.0` or newer and Kubernetes `1.37` with the `scheduling.k8s.io/v1beta1` `Workload` and `PodGroup` APIs. Volcano is not required.
-
-Follow [Enable native gang scheduling](https://lws.sigs.k8s.io/docs/installation/#enable-native-gang-scheduling) to configure the Kubernetes feature gates and scheduling APIs. For the LWS installation, select a compatible release and add these Helm values:
-
-```bash
---set featureGates.WorkloadAwareScheduling=true \
---set gangSchedulingManagement.schedulerProvider=kubernetes
-```
-
-Complete the upstream prerequisite verification and workload opt-in through `spec.scheduling`. Installing LWS or selecting the scheduler provider alone does not enable native gang scheduling for a workload; Dynamo does not set `spec.scheduling` automatically.
 
 ## Role-Specific Pod Templates
 

@@ -232,10 +232,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 
 #### LeaderWorkerSet
 
-Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove for multinode deployments. Choose one of these gang scheduling integrations:
-
-- [Volcano](multinode-orchestration.md#volcano): install Volcano and configure LWS to use its scheduler provider. This integration remains supported.
-- [Native Kubernetes Gang Scheduling](multinode-orchestration.md#native-kubernetes-gang-scheduling): configure compatible Kubernetes and LWS versions with the upstream feature gates and scheduling APIs. Volcano is not required.
+Install [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) as an alternative to Grove for multinode deployments. The [Volcano integration](multinode-orchestration.md#volcano) remains supported: install Volcano and configure LWS to use its scheduler provider.
 
 Dynamo detects LWS independently of the scheduler provider. See [Multinode Orchestration](multinode-orchestration.md#option-2-leaderworkerset) for installation and configuration.
 

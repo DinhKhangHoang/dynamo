@@ -61,8 +61,8 @@ because Volcano is absent.
 
 **Action:** Configure and verify your chosen LWS scheduling integration separately.
 Dynamo cannot determine the configured provider or whether gang scheduling is enabled
-from API discovery. See the [LWS native gang scheduling installation guide](https://lws.sigs.k8s.io/docs/installation/#enable-native-gang-scheduling)
-for upstream prerequisites. To keep LWS disabled, set `orchestrators.lws.enabled: false`
+from API discovery. See the [LWS installation guide](https://lws.sigs.k8s.io/docs/installation/)
+for upstream configuration. To keep LWS disabled, set `orchestrators.lws.enabled: false`
 in the operator configuration before upgrading.
 
 **Existing deployments:** Follow adjacent minor-version upgrades and complete
