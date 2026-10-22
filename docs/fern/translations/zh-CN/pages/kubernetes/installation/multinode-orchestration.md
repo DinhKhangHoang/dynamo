@@ -175,7 +175,7 @@ Invalid: a podTemplate on only one required role
 > 包含 Planner 且使用角色 Pod 模板的 DGD，需要 Planner runtime 1.6.0 或更新版本。如果镜像标签无法标识该版本，请设置 Planner 的 `runtimeVersionOverride`。
 > 角色 Pod 模板目前不能与 GPU Memory Service（GMS）或故障转移组合使用。
 
-有关校验和生命周期的详细说明，请参阅 [`roles` API 参考](../../../../../pages/reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec)。
+有关校验和生命周期的详细说明，请参阅 [roles API 参考](../../../../../pages/reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec)。
 
 ## 可移植拓扑环境变量
 
