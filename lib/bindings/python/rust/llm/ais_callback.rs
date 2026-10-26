@@ -133,6 +133,39 @@ impl PrefillLoadEstimator for RustAisCallback {
 }
 
 #[cfg(feature = "ais-forward-pass")]
+const FPM_WARMUP_ENV: &str = "DYN_AIS_FPM_WARMUP";
+
+/// Recorded forward passes to tune the AIS model with: one JSON array of rank FPMs per line.
+#[cfg(feature = "ais-forward-pass")]
+fn parse_warmup(text: &str) -> anyhow::Result<Vec<Vec<ForwardPassMetrics>>> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            serde_json::from_str(l)
+                .map_err(|e| anyhow::anyhow!("{FPM_WARMUP_ENV} line {}: {e}", i + 1))
+        })
+        .collect()
+}
+
+/// The mocker has no live FPM source, so a fitted route (op_level correction, fpm_regression)
+/// is tuned once at construction from the file named by DYN_AIS_FPM_WARMUP, if set.
+#[cfg(feature = "ais-forward-pass")]
+fn warm_up(model: &mut ForwardPassPerfModel) -> PyResult<()> {
+    let Ok(path) = std::env::var(FPM_WARMUP_ENV) else {
+        return Ok(());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("{FPM_WARMUP_ENV}={path}: {e}"))
+    })?;
+    let iterations = parse_warmup(&text)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    model.tune_with_fpms(&iterations).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("AIS warmup from {path} failed: {e}"))
+    })
+}
+
+#[cfg(feature = "ais-forward-pass")]
 fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
     let config: ForwardPassPerfModelConfig =
         serde_json::from_value(config.clone()).map_err(|e| {
@@ -142,9 +175,10 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
         .speculation
         .as_ref()
         .map_or(config.nextn, |spec| spec.num_speculative_tokens());
-    let model = ForwardPassPerfModel::best_available(config).map_err(|e| {
+    let mut model = ForwardPassPerfModel::best_available(config).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("AIS model construction failed: {e}"))
     })?;
+    warm_up(&mut model)?;
     if model.diagnostics().readiness != ForwardPassPerfReadiness::Ready {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "AIS estimator is not ready; Router/Mocker requires a ready model because it has no FPM training source",
@@ -194,7 +228,7 @@ pub(super) fn create_ais_prefill_load_estimator(
 
 #[cfg(all(test, feature = "ais-forward-pass"))]
 mod tests {
-    use super::{decode_metrics, prefill_metrics};
+    use super::{decode_metrics, parse_warmup, prefill_metrics};
 
     #[test]
     fn scheduler_queries_preserve_prefix_and_local_attention_dp_batch() {
@@ -213,5 +247,16 @@ mod tests {
         assert!(prefill_metrics(u32::MAX as usize, 1, 2).is_err());
         assert!(decode_metrics(u32::MAX as usize, 1, 1).is_err());
         assert!(decode_metrics(u32::MAX as usize, 2, 0).is_err());
+    }
+
+    #[test]
+    fn warmup_file_has_one_iteration_of_rank_fpms_per_line() {
+        let line = r#"[{"version":1,"worker_id":"w0","dp_rank":0,"counter_id":7,"wall_time":0.0136,"scheduled_requests":{"num_prefill_requests":1,"sum_prefill_tokens":512,"var_prefill_length":0.0,"sum_prefill_kv_tokens":0,"num_decode_requests":0,"sum_decode_kv_tokens":0,"var_decode_kv_tokens":0.0},"queued_requests":{"num_prefill_requests":0,"sum_prefill_tokens":0,"var_prefill_length":0.0,"num_decode_requests":0,"sum_decode_kv_tokens":0,"var_decode_kv_tokens":0.0}}]"#;
+        let its = parse_warmup(&format!("{line}\n\n{line}\n")).unwrap();
+        assert_eq!(its.len(), 2);
+        assert_eq!(its[0].len(), 1);
+        assert_eq!(its[0][0].scheduled_requests.sum_prefill_tokens, 512);
+        let err = parse_warmup("[{]\n").unwrap_err().to_string();
+        assert!(err.contains("line 1"), "{err}");
     }
 }
