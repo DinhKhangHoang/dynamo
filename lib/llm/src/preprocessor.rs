@@ -5400,6 +5400,19 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
+            // Gemma 4 opens an empty thought channel itself after a tool response even
+            // with thinking off; the Response starting state would keep it as content.
+            let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+                if reasoning_disabled && *family == unified_parser::GEMMA4_UNIFIED_FAMILY {
+                    Box::pin(Self::hold_usage_until_stream_end(
+                        Self::strip_leading_reasoning_start_from_stream(
+                            stream,
+                            unified_parser::GEMMA4_EMPTY_THOUGHT_CHANNEL,
+                        ),
+                    ))
+                } else {
+                    Box::pin(stream)
+                };
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
@@ -5473,9 +5486,13 @@ impl OpenAIPreprocessor {
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !reasoning_disabled_by_request
             && !skip_reasoning_for_guided_json;
-        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
-            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
-            && !skip_reasoning_for_guided_json;
+        let disabled_reasoning_start =
+            if reasoning_disabled_by_request && !skip_reasoning_for_guided_json {
+                Self::disabled_reasoning_start(reasoning_parser)
+            } else {
+                None
+            };
+        let should_strip_disabled_reasoning_start = disabled_reasoning_start.is_some();
         let guided_reasoning_start_token =
             if should_parse_reasoning && bypass_reasoning_for_bare_guided_json {
                 Self::guided_json_reasoning_start_token(reasoning_parser)
@@ -5545,9 +5562,10 @@ impl OpenAIPreprocessor {
                 bypass_reasoning_for_bare_guided_json,
                 defer_reasoning_for_nonempty_content,
             ))
-        } else if should_strip_disabled_reasoning_start {
+        } else if let Some(start_token) = disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
-                stream, "<think>",
+                stream,
+                start_token,
             ))
         } else {
             Box::pin(stream)
@@ -6619,6 +6637,22 @@ impl OpenAIPreprocessor {
         skip_special_tokens == Some(true) && parser_requires_special_tokens
     }
 
+    /// Leading marker the model can still emit after the request turned reasoning off,
+    /// stripped from `content` instead of parsed.
+    /// - Nemotron: a `<think>` start.
+    /// - Gemma 4: the empty thought channel the chat template prefills on every turn but
+    ///   the one after a tool response, where the model writes it itself. A non-empty
+    ///   channel does not match and stays content.
+    fn disabled_reasoning_start(reasoning_parser: Option<&str>) -> Option<&'static str> {
+        match reasoning_parser {
+            parser if Self::is_nemotron_force_reasoning(parser) => Some("<think>"),
+            Some("gemma4" | "gemma-4") => Some(
+                crate::protocols::openai::chat_completions::unified_parser::GEMMA4_EMPTY_THOUGHT_CHANNEL,
+            ),
+            _ => None,
+        }
+    }
+
     fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
@@ -7611,9 +7645,11 @@ impl OpenAIPreprocessor {
         }
     }
 
-    // Motivation: when Nemotron reasoning is disabled by request flags, the
-    // backend may still emit a leading <think>. Buffer the initial stream
-    // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
+    // Motivation: when reasoning is disabled by request flags, the backend may
+    // still emit a leading reasoning start (`<think>` on Nemotron, an empty
+    // thought channel on Gemma 4; see `disabled_reasoning_start`). Buffer the
+    // initial stream bytes so split chunks like "<thi" + "nk>answer" are
+    // stripped cleanly.
     fn strip_leading_reasoning_start_from_stream<S>(
         stream: S,
         think_start_token: &'static str,

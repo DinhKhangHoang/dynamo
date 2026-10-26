@@ -3713,6 +3713,120 @@ async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
     }
 }
 
+/// On the turn after a tool response, Gemma 4's chat template prefills nothing even with
+/// thinking off, so the model opens an empty thought channel itself. That empty channel
+/// must not reach `content`, wherever the chunk boundaries fall, and a tool call after it
+/// must still parse. A non-empty channel stays content. The legacy route runs no
+/// reasoning parser without a reasoning selector, so there the markers stay as they are.
+async fn assert_gemma4_disabled_empty_thought_channel_stripped(unified: bool) {
+    let call = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
+    let empty_then_call = format!("<|channel>thought\n<channel|>{call}");
+    // (raw output, content once the empty channel is stripped, tool calls)
+    let cases = [
+        (
+            "<|channel>thought\n<channel|>final answer",
+            "final answer",
+            0,
+        ),
+        (
+            "\n<|channel>thought\n<channel|>final answer",
+            "final answer",
+            0,
+        ),
+        (
+            "<|channel>thought\nkept<channel|>final answer",
+            "<|channel>thought\nkept<channel|>final answer",
+            0,
+        ),
+        (empty_then_call.as_str(), "", 1),
+    ];
+    for (reasoning_selector, tool_selector) in [
+        (Some("gemma4"), None),
+        (None, Some("gemma4")),
+        (Some("gemma4"), Some("gemma4")),
+        (None, Some("gemma-4")),
+    ] {
+        let preprocessor = build_preprocessor(reasoning_selector, tool_selector);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "dummy-gemma4-model",
+            "messages": [{"role": "user", "content": "answer plainly"}],
+            "stream": true,
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {
+                    "city": {"type": "string"}
+                }, "required": ["city"]}
+            }}]
+        }))
+        .unwrap();
+        for (text, stripped, expected_calls) in cases {
+            if expected_calls > 0 && tool_selector.is_none() {
+                continue;
+            }
+            for split in 0..=text.len() {
+                let input_stream = stream::iter(
+                    vec![
+                        mock_content_chunk(&text[..split]),
+                        mock_content_chunk(&text[split..]),
+                        mock_final_chunk(),
+                    ]
+                    .into_iter()
+                    .map(Annotated::from_data),
+                );
+                let output_stream = preprocessor
+                    .postprocessor_parsing_stream(input_stream, &request, false, false)
+                    .expect("postprocessor_parsing_stream should build");
+                let DrainOutput {
+                    reasoning,
+                    content,
+                    tool_calls,
+                    ..
+                } = drain_stream(output_stream).await;
+                let label =
+                    format!("{text:?} {reasoning_selector:?} {tool_selector:?} split{split}");
+                assert!(reasoning.is_empty(), "{label}: {reasoning:?}");
+                assert_eq!(tool_calls.len(), expected_calls, "{label}: {tool_calls:?}");
+                if expected_calls > 0 {
+                    assert_eq!(
+                        tool_calls[0].name.as_deref(),
+                        Some("get_weather"),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+                        serde_json::json!({"city": "Paris"}),
+                        "{label}"
+                    );
+                }
+                if unified || reasoning_selector.is_some() {
+                    assert_eq!(content, stripped, "{label}");
+                } else if expected_calls == 0 {
+                    assert_eq!(content, text, "{label}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_strips_empty_thought_channel() {
+    assert_gemma4_disabled_empty_thought_channel_stripped(false).await;
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_strips_empty_thought_channel_parser_v2() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::gemma4_without_enable_thinking_strips_empty_thought_channel_parser_v2"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_gemma4_disabled_empty_thought_channel_stripped(true).await;
+}
+
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
 /// preserve native reasoning before guided JSON. Structured bare JSON should
 /// therefore use the legacy guided-output bypass and remain assistant content.

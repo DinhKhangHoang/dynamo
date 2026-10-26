@@ -71,6 +71,9 @@ pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
+/// The empty thought channel Gemma 4's chat template prefills when thinking is off. The
+/// template skips it on the turn after a tool response, and the model then writes it itself.
+pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
 
@@ -278,6 +281,19 @@ impl UnifiedRequestPolicy {
         } else {
             inferred
         }
+    }
+
+    /// With Gemma 4 reasoning disabled, drop a leading empty thought channel: it is the one
+    /// the template would have prefilled on any other turn. A non-empty channel is left
+    /// in place and stays literal content.
+    fn strip_disabled_empty_thought<'a>(self, family: &str, content: &'a str) -> &'a str {
+        if !self.reasoning_disabled || family != GEMMA4_UNIFIED_FAMILY {
+            return content;
+        }
+        content
+            .trim_start()
+            .strip_prefix(GEMMA4_EMPTY_THOUGHT_CHANNEL)
+            .unwrap_or(content)
     }
 
     fn inspects_json_prefill(self, constraint: &GuidedToolConstraint) -> bool {
@@ -2319,6 +2335,7 @@ pub(crate) fn parse_complete_with_policy(
     tool_definitions: &[ToolDefinition],
     policy: UnifiedRequestPolicy,
 ) -> anyhow::Result<CompleteOutput> {
+    let content = policy.strip_disabled_empty_thought(family, content);
     // A remote frontend may reconstruct guided JSON even when the backend returned
     // native reasoning/content without a tool call. Keep that recovery under the
     // same grammar owner as ordinary native batch output.
@@ -11932,6 +11949,46 @@ pub(crate) mod tests {
                     "{family} malformed JSON string must keep its error"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn disabled_gemma_drops_leading_empty_thought_channel_in_batch() {
+        let policy = UnifiedRequestPolicy {
+            reasoning_disabled: true,
+            ..Default::default()
+        };
+        let call = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
+        for (raw, expected_text, expected_calls) in [
+            (
+                "<|channel>thought\n<channel|>final answer".to_string(),
+                "final answer",
+                0,
+            ),
+            (
+                "\n<|channel>thought\n<channel|>final answer".to_string(),
+                "final answer",
+                0,
+            ),
+            (format!("<|channel>thought\n<channel|>{call}"), "", 1),
+            // Only the leading channel stands in for the template's prefill.
+            (
+                "answer<|channel>thought\n<channel|>".to_string(),
+                "answer<|channel>thought\n<channel|>",
+                0,
+            ),
+        ] {
+            let batch = parse_complete_with_policy(
+                "gemma4",
+                &raw,
+                &GuidedToolConstraint::None,
+                &weather_tools(),
+                policy,
+            )
+            .unwrap();
+            assert_eq!(batch.text, expected_text, "{raw:?}");
+            assert!(batch.reasoning.is_empty(), "{raw:?}");
+            assert_eq!(batch.tool_calls.len(), expected_calls, "{raw:?}");
         }
     }
 
