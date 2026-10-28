@@ -5341,10 +5341,7 @@ impl OpenAIPreprocessor {
             && Self::is_force_reasoning_parser(reasoning_parser)
             && !inspect_force_reasoning_guided_output;
 
-        let reasoning_disabled_by_request = !Self::keeps_gemma4_reasoning_with_tool_parser(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) && Self::is_reasoning_disabled_by_request(
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
             request.chat_template_args.as_ref(),
         );
@@ -5353,9 +5350,13 @@ impl OpenAIPreprocessor {
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
             && !reasoning_disabled_by_request
             && !skip_reasoning_for_guided_json;
-        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
-            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
-            && !skip_reasoning_for_guided_json;
+        let disabled_reasoning_start =
+            if reasoning_disabled_by_request && !skip_reasoning_for_guided_json {
+                Self::disabled_reasoning_start(self.tool_call_parser.as_deref(), reasoning_parser)
+            } else {
+                None
+            };
+        let should_strip_disabled_reasoning_start = disabled_reasoning_start.is_some();
         let guided_reasoning_start_token =
             if should_parse_reasoning && bypass_reasoning_for_bare_guided_json {
                 Self::guided_json_reasoning_start_token(reasoning_parser)
@@ -5396,9 +5397,10 @@ impl OpenAIPreprocessor {
                 bypass_reasoning_for_bare_guided_json,
                 defer_reasoning_for_nonempty_content,
             ))
-        } else if should_strip_disabled_reasoning_start {
+        } else if let Some(start_token) = disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
-                stream, "<think>",
+                stream,
+                start_token,
             ))
         } else {
             Box::pin(stream)
@@ -6541,9 +6543,15 @@ impl OpenAIPreprocessor {
                 reasoning_parser,
             )
             .is_some();
+        // Same exception as the unified request path: Gemma 4 reasoning stays on with
+        // the Gemma 4 tool-call parser. The legacy route only strips a leading empty
+        // channel, which withholds nothing past it.
+        let reasoning_disabled_by_request =
+            !Self::unified_keeps_gemma4_reasoning(tool_call_parser, reasoning_parser)
+                && Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args);
         has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
-            && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
+            && !reasoning_disabled_by_request
     }
 
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
@@ -6778,30 +6786,54 @@ impl OpenAIPreprocessor {
                 _ => thinking == Some(false),
             };
         }
-        if Self::keeps_gemma4_reasoning_with_tool_parser(tool_parser, reasoning_parser) {
-            return false;
-        }
         Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
     }
 
-    /// With the Gemma 4 tool-call parser, Gemma 4 reasoning parsing stays on even when
-    /// the request leaves thinking off. The chat template then prefills an empty
+    /// With thinking off, Gemma 4's chat template prefills an empty
     /// `<|channel>thought\n<channel|>` on every turn but the one after a tool response,
-    /// where the model writes it itself; the reasoning parser takes it out of `content`,
-    /// as vLLM's gemma4 reasoning parser does. Other turns carry no channel markers and
-    /// pass through unchanged.
+    /// where the model writes it itself. With the Gemma 4 tool-call parser that channel
+    /// leaves `content`, as with vLLM's gemma4 reasoning parser:
+    /// - Unified route: reasoning parsing stays on. The unified parser reads tool
+    ///   payloads itself, so channel markers inside tool arguments stay intact.
+    /// - Legacy split route: the reasoning parser runs before the tool-call jail and
+    ///   would strip markers inside tool arguments, so only a leading empty channel is
+    ///   removed (see `disabled_reasoning_start`).
+    ///
+    /// Turns without channel markers pass through unchanged.
     fn is_gemma4_tool_parser(tool_parser: Option<&str>) -> bool {
         matches!(tool_parser, Some("gemma4" | "gemma-4"))
     }
 
-    /// Legacy split route: the Gemma 4 reasoning parser stays on with the Gemma 4
-    /// tool-call parser (see `is_gemma4_tool_parser`).
-    fn keeps_gemma4_reasoning_with_tool_parser(
+    /// Whether the unified route keeps Gemma 4 reasoning on for a request that turned
+    /// thinking off (see `is_gemma4_tool_parser`). Used by the stream heartbeat
+    /// predicate, which runs before the route is chosen.
+    fn unified_keeps_gemma4_reasoning(
         tool_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
         Self::is_gemma4_tool_parser(tool_parser)
-            && matches!(reasoning_parser, Some("gemma4" | "gemma-4"))
+            && crate::protocols::openai::chat_completions::unified_parser::selected_content_decoder_family(
+                tool_parser,
+                reasoning_parser,
+            ) == Some(crate::protocols::openai::chat_completions::unified_parser::GEMMA4_UNIFIED_FAMILY)
+    }
+
+    /// Leading marker the model can still emit after the request turned reasoning off,
+    /// stripped from `content` on the legacy split route instead of parsed.
+    /// - Nemotron: a `<think>` start.
+    /// - Gemma 4 with the Gemma 4 tool-call parser: the empty thought channel (see
+    ///   `is_gemma4_tool_parser`). A non-empty channel does not match and stays content.
+    fn disabled_reasoning_start(
+        tool_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<&'static str> {
+        match reasoning_parser {
+            parser if Self::is_nemotron_force_reasoning(parser) => Some("<think>"),
+            Some("gemma4" | "gemma-4") if Self::is_gemma4_tool_parser(tool_parser) => Some(
+                crate::protocols::openai::chat_completions::unified_parser::GEMMA4_EMPTY_THOUGHT_CHANNEL,
+            ),
+            _ => None,
+        }
     }
 
     fn is_reasoning_disabled_by_request(
