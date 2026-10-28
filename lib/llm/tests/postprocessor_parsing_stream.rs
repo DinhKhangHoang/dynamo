@@ -3713,7 +3713,10 @@ async fn assert_gemma4_without_enable_thinking() {
             }}]
         }))
         .unwrap();
-        let parsed = tool_selector.is_some();
+        // v1.6.0 has no V2-by-default (#16822): the legacy route with only a tool selector
+        // runs no reasoning parser, so the text passes through there.
+        let parser_v2 = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("2");
+        let parsed = tool_selector.is_some() && (reasoning_selector.is_some() || parser_v2);
         for (text, parsed_reasoning, parsed_content, expected_calls) in cases {
             if expected_calls > 0 && tool_selector.is_none() {
                 continue;
